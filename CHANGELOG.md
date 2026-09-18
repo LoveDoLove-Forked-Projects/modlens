@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.26.2 - 2026-09-19
+
+- **dsh: `/modlens/paste` answers same-origin loopback only ([#107](https://github.com/liustack/modlens/issues/107)).** The paste route wrote to disk and disclosed the takeover verdict without the fence `/modlens/config` already had, so a page rebound onto loopback, or a cross-site page on the same machine, could plant a file in the paste store and, by repeating it, push the store over its ceiling and sweep away pastes a live session still had to read. Both branches now run the same `isTrustedRequest` check as the config route: a non-loopback Host, `Sec-Fetch-Site: cross-site`, or an Origin that does not match the Host is refused with 403 and nothing is written. The client treats that 403 like a 404 and stands down for the page, so a refused paste goes native at once instead of being taken and lost for the rest of the verdict window; the settings card does the same and does not mount. The refusal line is one shared constant, and both routes' tests assert it. A dsh opened over a LAN address loses paste-to-path and the settings card, which is the config route's existing behavior. Thanks to @nanami-0713 for the report.
+
 ## 3.26.1 - 2026-09-08
 
 - **dsh paste-to-path writes into the Lexical composer ([#100](https://github.com/liustack/modlens/issues/100)).** dsh 0.1.2-rc.1 replaced the composer textarea with a Lexical contenteditable div. The paste listener still uploaded the image, then `insertText` returned immediately because it only accepted `TEXTAREA` and `INPUT`, so the path never landed and the console stayed quiet. Paste-to-path now resolves a writable target (textarea, input, or `[data-composer-input][contenteditable=true]`) before taking the event, inserts with `execCommand`, and logs the path if that insert fails. Thanks to @xp1205700819-sudo.
