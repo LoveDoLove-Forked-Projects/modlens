@@ -488,6 +488,14 @@ function registerPasteRoute(ctx, host, ownProviders, config = {}) {
     kind: 'exact',
     path: '/modlens/paste',
     handler: async (req, res) => {
+      // Same fence as /modlens/config, for the same reason: a page on this
+      // machine, or one rebound onto loopback, must not be able to plant a
+      // file here or read back what the takeover verdict discloses.
+      if (!isTrustedRequest(req)) {
+        res.writeHead(403, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'request refused: this route answers same-origin loopback only' }))
+        return
+      }
       if (req.method === 'GET') {
         try {
           const label = new URL(req.url, 'http://localhost').searchParams.get('model') ?? ''

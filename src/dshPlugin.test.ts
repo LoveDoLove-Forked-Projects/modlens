@@ -2225,10 +2225,16 @@ describe('dsh paste-to-path host route', () => {
         return routes;
     }
 
-    function fakeReq(method: string, body: Buffer, url = '/modlens/paste') {
+    function fakeReq(
+        method: string,
+        body: Buffer,
+        url = '/modlens/paste',
+        headers: Record<string, string> = { host: '127.0.0.1:3080' },
+    ) {
         return {
             method,
             url,
+            headers,
             destroy: () => {},
             async *[Symbol.asyncIterator]() {
                 yield body;
@@ -2415,6 +2421,46 @@ describe('dsh paste-to-path host route', () => {
         if (process.platform !== 'win32') {
             expect(fs.statSync(written).mode & 0o777).toBe(0o600);
         }
+        fs.rmSync(path.dirname(written), { recursive: true, force: true });
+    });
+
+    it('refuses a cross-site paste, which would write a file for a foreign page (#107)', async () => {
+        const store = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-testpaste-'));
+        routePasteDirs.push(store);
+        const routes = await routeOf({ pasteDir: store });
+        const { out, res } = fakeRes();
+        const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 5]);
+        await routes[0].handler(
+            fakeReq('POST', png, '/modlens/paste', {
+                host: '127.0.0.1:3080',
+                'sec-fetch-site': 'cross-site',
+            }) as never,
+            res as never,
+        );
+        expect(out.code).toBe(403);
+        expect(fs.readdirSync(store)).toEqual([]);
+    });
+
+    it('refuses a Host that is not loopback, which is what rebinding forges (#107)', async () => {
+        const routes = await routeOf();
+        const { out, res } = fakeRes();
+        await routes[0].handler(
+            fakeReq('GET', Buffer.alloc(0), '/modlens/paste?model=DeepSeek-V4-Flash', {
+                host: 'evil.example',
+            }) as never,
+            res as never,
+        );
+        expect(out.code).toBe(403);
+    });
+
+    it('still answers an ordinary loopback paste (#107)', async () => {
+        const routes = await routeOf();
+        const { out, res } = fakeRes();
+        const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 5]);
+        await routes[0].handler(fakeReq('POST', png) as never, res as never);
+        expect(out.code).toBe(200);
+        const { path: written } = JSON.parse(out.body) as { path: string };
+        expect(fs.readFileSync(written)).toEqual(png);
         fs.rmSync(path.dirname(written), { recursive: true, force: true });
     });
 
@@ -3408,7 +3454,11 @@ describe('paste takeover verdict (#36)', () => {
     const ask = async (handler: Handler | null, label: string) => {
         let body = '';
         await handler?.(
-            { method: 'GET', url: `/modlens/paste?model=${encodeURIComponent(label)}` },
+            {
+                method: 'GET',
+                url: `/modlens/paste?model=${encodeURIComponent(label)}`,
+                headers: { host: '127.0.0.1:3080' },
+            },
             { writeHead: () => {}, end: (chunk: string) => (body = chunk) },
         );
         return JSON.parse(body).takeover as boolean;
@@ -3552,7 +3602,11 @@ describe('paste takeover verdict, second instance (#36)', () => {
 
         let body = '';
         await captured.handler?.(
-            { method: 'GET', url: '/modlens/paste?model=DeepSeek-V4-Pro' },
+            {
+                method: 'GET',
+                url: '/modlens/paste?model=DeepSeek-V4-Pro',
+                headers: { host: '127.0.0.1:3080' },
+            },
             { writeHead: () => {}, end: (chunk: string) => (body = chunk) },
         );
         expect(JSON.parse(body).takeover).toBe(true);
@@ -3631,7 +3685,11 @@ describe('paste takeover verdict, ownership proof (#36)', () => {
     ) => {
         let body = '';
         await handler?.(
-            { method: 'GET', url: `/modlens/paste?model=${encodeURIComponent(label)}` },
+            {
+                method: 'GET',
+                url: `/modlens/paste?model=${encodeURIComponent(label)}`,
+                headers: { host: '127.0.0.1:3080' },
+            },
             { writeHead: () => {}, end: (chunk: string) => (body = chunk) },
         );
         return JSON.parse(body).takeover as boolean;
@@ -3781,7 +3839,11 @@ describe('paste takeover verdict, auto-discovered wrapper id (#36)', () => {
 
         let body = '';
         await captured.handler?.(
-            { method: 'GET', url: '/modlens/paste?model=GLM-5.3' },
+            {
+                method: 'GET',
+                url: '/modlens/paste?model=GLM-5.3',
+                headers: { host: '127.0.0.1:3080' },
+            },
             { writeHead: () => {}, end: (chunk: string) => (body = chunk) },
         );
         expect(JSON.parse(body).takeover).toBe(true);
