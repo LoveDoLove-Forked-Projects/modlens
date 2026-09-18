@@ -122,7 +122,9 @@ window.__ModuleLoader__.load({
     // vision model (keeps its thumbnail) and a text-only one (keeps only its
     // old error message, once). A 404 means the route is off (pasteToPath:
     // false, or no host half), so the client stands down entirely instead of
-    // swallowing pastes into a dead endpoint.
+    // swallowing pastes into a dead endpoint. A 403 means the route refuses
+    // this page's origin (non-loopback Host, or cross-site), which is just as
+    // permanent for this page, so it stands down the same way.
     var routeAvailable = true
     var verdicts = {}
     // A verdict older than this is UNKNOWN again, even while a refresh is in
@@ -144,7 +146,7 @@ window.__ModuleLoader__.load({
       verdicts[label] = entry
       fetch(`/modlens/paste?model=${encodeURIComponent(label)}`)
         .then((res) => {
-          if (res.status === 404) {
+          if (res.status === 404 || res.status === 403) {
             routeAvailable = false
             entry.pending = false
             return null
@@ -199,10 +201,11 @@ window.__ModuleLoader__.load({
         })
         .catch((error) => {
           // A 404 here means the route vanished AFTER a verdict confirmed it
-          // (plugin disposed mid-session): that race can cost this one paste
-          // — preventDefault already ran — but never another. Stand down and
+          // (plugin disposed mid-session), and a 403 that it refuses this
+          // page's origin: either way that race can cost this one paste —
+          // preventDefault already ran — but never another. Stand down and
           // forget every verdict, so the next paste goes native immediately.
-          if (error && error.status === 404) {
+          if (error && (error.status === 404 || error.status === 403)) {
             routeAvailable = false
             verdicts = {}
           }
@@ -1091,10 +1094,12 @@ window.__ModuleLoader__.load({
         // off (settingsCard: false, or no web profile) a card would only
         // render an error, which is not what turning a feature off means.
         // Any response at all proves the route exists; only a 404 or a
-        // network failure reads as absent.
+        // network failure reads as absent. A 403 is the route's same-origin
+        // loopback fence turning this page away, which is just as permanent,
+        // so the card stays away there too.
         fetch('/modlens/config')
           .then((response) => {
-            if (response.status === 404) return
+            if (response.status === 404 || response.status === 403) return
             try {
               mountCard(scope, localeRef)
             } catch (error) {

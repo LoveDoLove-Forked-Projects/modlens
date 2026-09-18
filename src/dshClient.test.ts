@@ -340,6 +340,24 @@ describe('dsh paste-to-path browser half', () => {
         expect(harness.insertedText()).toBe('');
     });
 
+    it('stands down entirely when the route refuses this origin (403)', async () => {
+        // A 403 is the host saying this page's origin is not welcome (a
+        // non-loopback Host, or a cross-site page): permanent for this page,
+        // so it stands the client down exactly like a 404.
+        const harness = loadClient({ policy: () => ({ status: 403 }) });
+        harness.setModelLabel('DeepSeek-V4-Flash');
+        harness.focusComposer();
+        await harness.settle();
+        const before = harness.fetchCalls.length;
+        const paste = harness.dispatchPaste(IMAGE);
+        expect(paste.prevented).toBe(false);
+        await harness.settle();
+        expect(harness.dispatchPaste(IMAGE).prevented).toBe(false);
+        await harness.settle();
+        expect(harness.fetchCalls.length).toBe(before);
+        expect(harness.insertedText()).toBe('');
+    });
+
     it('pastes inside the failure round-trip window are the bounded loss', async () => {
         // Two pastes fired before the 404 settles are both taken (the
         // documented window: one local round-trip); once the failure lands,
@@ -369,6 +387,29 @@ describe('dsh paste-to-path browser half', () => {
         const harness = loadClient({
             policy: () => ({ status: 200, takeover: true }),
             postStatus: 404,
+        });
+        harness.setModelLabel('DeepSeek-V4-Flash');
+        harness.focusComposer();
+        await harness.settle();
+        const swallowed = harness.dispatchPaste(IMAGE);
+        expect(swallowed.prevented).toBe(true);
+        await harness.settle();
+        expect(harness.insertedText()).toBe('');
+        const before = harness.fetchCalls.length;
+        const next = harness.dispatchPaste(IMAGE);
+        expect(next.prevented).toBe(false);
+        await harness.settle();
+        expect(harness.fetchCalls.length).toBe(before);
+    });
+
+    it('a POST 403 after a confirmed verdict stands the client down for good', async () => {
+        // A verdict cached a moment ago is no promise the upload lands: a
+        // gateway or reverse proxy in front of the route can start refusing,
+        // or the page's origin can be judged foreign between the two calls.
+        // Like a 404, that costs the one in-flight paste and nothing after it.
+        const harness = loadClient({
+            policy: () => ({ status: 200, takeover: true }),
+            postStatus: 403,
         });
         harness.setModelLabel('DeepSeek-V4-Flash');
         harness.focusComposer();
@@ -561,12 +602,15 @@ describe('settings card (#39)', () => {
             querySelectorAll: () => [],
             documentElement: { lang: 'en' },
         };
-        const fetchStub = (url: string) =>
-            Promise.resolve({
+        const configFetches: string[] = [];
+        const fetchStub = (url: string) => {
+            if (url.startsWith('/modlens/config')) configFetches.push(url);
+            return Promise.resolve({
                 ok: configStatus >= 200 && configStatus < 300,
                 status: url.startsWith('/modlens/config') ? configStatus : 200,
                 json: () => Promise.resolve({}),
             });
+        };
         const run = new Function('window', 'document', 'fetch', 'Event', 'navigator', SOURCE_TEXT);
         run(windowStub, documentStub, fetchStub, class {}, { language: 'en' });
         if (!loaded) throw new Error('client.js never called __ModuleLoader__.load');
@@ -598,7 +642,7 @@ describe('settings card (#39)', () => {
                 }
             },
         });
-        return { slotRegistrations, slotSpecs, injected, card: exports.__card };
+        return { slotRegistrations, slotSpecs, injected, configFetches, card: exports.__card };
     }
 
     it('does not mount where its route is off, instead of rendering an error', async () => {
@@ -607,6 +651,16 @@ describe('settings card (#39)', () => {
         const off = loadCard(404);
         await new Promise((resolve) => setTimeout(resolve, 10));
         expect(off.slotRegistrations).toEqual([]);
+    });
+
+    it('does not mount where the route refuses this origin (403)', async () => {
+        // The route is fenced to same-origin loopback. A 403 says this page
+        // will never be served, so the card stays away rather than mounting
+        // an error, and nothing keeps knocking.
+        const off = loadCard(403);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(off.slotRegistrations).toEqual([]);
+        expect(off.configFetches).toHaveLength(1);
     });
 
     it('mounts when the route answers', async () => {
