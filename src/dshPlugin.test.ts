@@ -2243,12 +2243,13 @@ describe('dsh paste-to-path host route', () => {
     }
 
     function fakeRes() {
-        const out = { code: 0, body: '' };
+        const out = { code: 0, body: '', headers: {} as Record<string, string> };
         return {
             out,
             res: {
-                writeHead: (code: number) => {
+                writeHead: (code: number, headers?: Record<string, string>) => {
                     out.code = code;
+                    out.headers = headers ?? {};
                     return { end: (b?: string) => (out.body = b ?? '') };
                 },
                 end: (b?: string) => {
@@ -2451,6 +2452,56 @@ describe('dsh paste-to-path host route', () => {
             res as never,
         );
         expect(out.code).toBe(403);
+    });
+
+    it('answers a refusal as JSON with the shared refusal line (#107)', async () => {
+        // Shape and content-type are what the client sees; the line itself is
+        // the one constant both host routes send, so it is read, not copied.
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as { __paste: { refusal: string } };
+        const routes = await routeOf();
+        const { out, res } = fakeRes();
+        await routes[0].handler(
+            fakeReq('GET', Buffer.alloc(0), '/modlens/paste?model=DeepSeek-V4-Flash', {
+                host: 'evil.example',
+            }) as never,
+            res as never,
+        );
+        expect(out.code).toBe(403);
+        expect(out.headers['content-type']).toBe('application/json');
+        expect(JSON.parse(out.body)).toEqual({ error: plugin.__paste.refusal });
+    });
+
+    it('refuses a POST with no Host header at all, without throwing (#107)', async () => {
+        // A request that carries no headers must land on the refusal, not on
+        // a crash inside the check and not on a written file.
+        const store = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-testpaste-'));
+        routePasteDirs.push(store);
+        const routes = await routeOf({ pasteDir: store });
+        const { out, res } = fakeRes();
+        const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 5]);
+        await routes[0].handler(fakeReq('POST', png, '/modlens/paste', {}) as never, res as never);
+        expect(out.code).toBe(403);
+        expect(fs.readdirSync(store)).toEqual([]);
+    });
+
+    it('refuses a POST whose Origin does not match its loopback Host (#107)', async () => {
+        // Loopback Host alone is not enough: another local page on a
+        // different port is a different origin and must not write here.
+        const store = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-testpaste-'));
+        routePasteDirs.push(store);
+        const routes = await routeOf({ pasteDir: store });
+        const { out, res } = fakeRes();
+        const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 5]);
+        await routes[0].handler(
+            fakeReq('POST', png, '/modlens/paste', {
+                host: '127.0.0.1:3080',
+                origin: 'http://127.0.0.1:9999',
+            }) as never,
+            res as never,
+        );
+        expect(out.code).toBe(403);
+        expect(fs.readdirSync(store)).toEqual([]);
     });
 
     it('still answers an ordinary loopback paste (#107)', async () => {
@@ -3913,6 +3964,13 @@ describe('settings card route (#39)', () => {
         return { status, body: body === '' ? {} : JSON.parse(body) };
     };
 
+    // Both host routes refuse in the same words, from one exported constant.
+    const refusalText = async () => {
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as { __config: { refusal: string } };
+        return plugin.__config.refusal;
+    };
+
     const withConfig = async (
         contents: Record<string, unknown>,
         run: (handler: Handler, file: string) => Promise<void>,
@@ -4207,12 +4265,13 @@ describe('settings card route (#39)', () => {
     it('refuses a cross-origin write, which could repoint the engine', async () => {
         await withConfig({ provider: 'openai' }, async (handler, file) => {
             const before = fs.readFileSync(file, 'utf-8');
-            const { status } = await call(handler, {
+            const { status, body } = await call(handler, {
                 method: 'POST',
                 url: '/x',
                 headers: { host: '127.0.0.1:3080', origin: 'https://evil.example' },
             });
             expect(status).toBe(403);
+            expect(body).toEqual({ error: await refusalText() });
             expect(fs.readFileSync(file, 'utf-8')).toBe(before);
         });
     });
@@ -4221,23 +4280,25 @@ describe('settings card route (#39)', () => {
         // Host is the header a rebound page cannot fake: it carries the
         // attacker's domain while the socket reaches this server.
         await withConfig({ provider: 'openai' }, async (handler) => {
-            const { status } = await call(handler, {
+            const { status, body } = await call(handler, {
                 method: 'GET',
                 url: '/x',
                 headers: { host: 'evil.example' },
             });
             expect(status).toBe(403);
+            expect(body).toEqual({ error: await refusalText() });
         });
     });
 
     it('refuses a cross-site fetch even when the headers otherwise look local', async () => {
         await withConfig({ provider: 'openai' }, async (handler) => {
-            const { status } = await call(handler, {
+            const { status, body } = await call(handler, {
                 method: 'GET',
                 url: '/x',
                 headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' },
             });
             expect(status).toBe(403);
+            expect(body).toEqual({ error: await refusalText() });
         });
     });
 

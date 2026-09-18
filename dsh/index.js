@@ -493,7 +493,7 @@ function registerPasteRoute(ctx, host, ownProviders, config = {}) {
       // file here or read back what the takeover verdict discloses.
       if (!isTrustedRequest(req)) {
         res.writeHead(403, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: 'request refused: this route answers same-origin loopback only' }))
+        res.end(JSON.stringify({ error: ROUTE_REFUSAL }))
         return
       }
       if (req.method === 'GET') {
@@ -1908,6 +1908,11 @@ function isLoopbackHost(hostname) {
   )
 }
 
+// Both host routes answer an untrusted request with this exact line. It is
+// one constant so the two fences cannot drift apart, and so the tests can
+// assert the wire contract instead of a copy of it.
+const ROUTE_REFUSAL = 'request refused: this route answers same-origin loopback only'
+
 /**
  * The same fence dsh puts in front of its own /api, for the same two
  * confused-deputy paths. Host is the header DNS rebinding cannot forge, so it
@@ -2140,7 +2145,7 @@ function registerConfigRoute(ctx) {
         res.end(JSON.stringify(body))
       }
       if (!isTrustedRequest(req)) {
-        send(403, { error: 'request refused: this route answers same-origin loopback only' })
+        send(403, { error: ROUTE_REFUSAL })
         return
       }
       if (req.method === 'GET') {
@@ -2194,7 +2199,7 @@ function registerConfigRoute(ctx) {
 // reachable from the test suite the way client.js exposes `__card`. They read
 // and write a real file and a real environment, so they are tested against
 // both rather than through the HTTP route.
-export const __config = { engineSummary, applyEngineSettings, modlensConfigPath }
+export const __config = { engineSummary, applyEngineSettings, modlensConfigPath, refusal: ROUTE_REFUSAL }
 
 // The paste sweeper, reachable from the test suite the way __config is.
 export const __paste = {
@@ -2203,5 +2208,6 @@ export const __paste = {
   openPasteRoot,
   pasteRoot,
   ttlMs: PASTE_TTL_MS,
+  refusal: ROUTE_REFUSAL,
   maxBytes: PASTE_STORE_MAX_BYTES,
 }
