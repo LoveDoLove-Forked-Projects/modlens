@@ -72,6 +72,8 @@ function loadClient(options: {
     policy?: (label: string) => { status: number; takeover?: boolean };
     uploadPath?: string;
     postStatus?: number;
+    // Per-upload outcome, by POST order; overrides uploadPath and postStatus.
+    upload?: (index: number) => { status: number; path?: string };
     composer?: 'textarea' | 'contenteditable';
     execCommand?: true | false | 'throw';
 }): Harness {
@@ -79,6 +81,8 @@ function loadClient(options: {
     const policy = options.policy ?? (() => ({ status: 200, takeover: false }));
     const uploadPath = options.uploadPath ?? '/tmp/modlens-test/paste.png';
     const postStatus = options.postStatus ?? 200;
+    const upload = options.upload ?? (() => ({ status: postStatus, path: uploadPath }));
+    let postCount = 0;
     const kind = options.composer ?? 'textarea';
     const execCommandMode = options.execCommand ?? true;
 
@@ -202,14 +206,14 @@ function loadClient(options: {
     const fetchStub = (url: string, init?: { method?: string; body?: unknown }) => {
         fetchCalls.push({ url, init });
         if (init?.method === 'POST') {
+            const outcome = upload(postCount++);
+            const ok = outcome.status >= 200 && outcome.status < 300;
             return Promise.resolve({
-                ok: postStatus >= 200 && postStatus < 300,
-                status: postStatus,
+                ok,
+                status: outcome.status,
                 json: () =>
                     Promise.resolve(
-                        postStatus >= 200 && postStatus < 300
-                            ? { path: uploadPath }
-                            : { error: `gone (${postStatus})` },
+                        ok ? { path: outcome.path } : { error: `gone (${outcome.status})` },
                     ),
             });
         }
@@ -423,6 +427,57 @@ describe('dsh paste-to-path browser half', () => {
         expect(next.prevented).toBe(false);
         await harness.settle();
         expect(harness.fetchCalls.length).toBe(before);
+    });
+
+    it('one failed upload in a multi-image paste keeps the others (#111)', async () => {
+        // The paste is already taken (preventDefault ran), so dropping the
+        // images that did land would lose them for good. Only the failed one
+        // goes missing, and an ordinary failure leaves the client standing.
+        const harness = loadClient({
+            policy: () => ({ status: 200, takeover: true }),
+            upload: (index) =>
+                index === 1
+                    ? { status: 413 }
+                    : { status: 200, path: `/tmp/modlens-test/paste-${index}.png` },
+        });
+        harness.setModelLabel('DeepSeek-V4-Flash');
+        harness.focusComposer();
+        await harness.settle();
+        const errors: string[] = [];
+        const spy = vi.spyOn(console, 'error').mockImplementation((value?: unknown) => {
+            errors.push(String(value));
+        });
+        try {
+            expect(harness.dispatchPaste([...IMAGE, ...IMAGE, ...IMAGE]).prevented).toBe(true);
+            await harness.settle();
+        } finally {
+            spy.mockRestore();
+        }
+        expect(harness.insertedText()).toBe(
+            '/tmp/modlens-test/paste-0.png /tmp/modlens-test/paste-2.png ',
+        );
+        expect(errors.join('\n')).toContain('gone (413)');
+        expect(harness.dispatchPaste(IMAGE).prevented).toBe(true);
+    });
+
+    it('a 404 inside a multi-image paste still keeps the uploads that landed and stands down', async () => {
+        const harness = loadClient({
+            policy: () => ({ status: 200, takeover: true }),
+            upload: (index) =>
+                index === 0 ? { status: 200, path: '/tmp/modlens-test/kept.png' } : { status: 404 },
+        });
+        harness.setModelLabel('DeepSeek-V4-Flash');
+        harness.focusComposer();
+        await harness.settle();
+        const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            expect(harness.dispatchPaste([...IMAGE, ...IMAGE]).prevented).toBe(true);
+            await harness.settle();
+        } finally {
+            spy.mockRestore();
+        }
+        expect(harness.insertedText()).toBe('/tmp/modlens-test/kept.png ');
+        expect(harness.dispatchPaste(IMAGE).prevented).toBe(false);
     });
 
     it('a verdict past its hard age bound is unknown again, not reused', async () => {

@@ -188,18 +188,16 @@ window.__ModuleLoader__.load({
       // with it the host-side image admission a text-only model fails).
       event.preventDefault()
       event.stopImmediatePropagation()
-      Promise.all(files.map(uploadOne))
-        .then((results) => {
-          var text = results
-            .map((r) => r.path)
-            .filter(Boolean)
-            .join(' ')
-          if (!text) return
-          if (!insertText(target, `${text} `)) {
-            console.error(`[modlens] paste-to-path: could not insert into the composer (${text})`)
+      // Settle each upload on its own: the paste is already taken, so one
+      // failed image must not take the ones that landed down with it (#111).
+      Promise.allSettled(files.map(uploadOne)).then((outcomes) => {
+        var paths = []
+        outcomes.forEach((outcome) => {
+          if (outcome.status === 'fulfilled') {
+            if (outcome.value.path) paths.push(outcome.value.path)
+            return
           }
-        })
-        .catch((error) => {
+          var error = outcome.reason
           // A 404 here means the route vanished AFTER a verdict confirmed it
           // (plugin disposed mid-session), and a 403 that it refuses this
           // page's origin: either way that race can cost this one paste —
@@ -211,6 +209,12 @@ window.__ModuleLoader__.load({
           }
           console.error(`[modlens] paste-to-path failed: ${error?.message ? error.message : error}`)
         })
+        var text = paths.join(' ')
+        if (!text) return
+        if (!insertText(target, `${text} `)) {
+          console.error(`[modlens] paste-to-path: could not insert into the composer (${text})`)
+        }
+      })
     }
 
     // The settings card (issue #39). dsh renders a fixed set of plugin cards
