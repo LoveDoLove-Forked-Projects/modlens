@@ -1525,6 +1525,10 @@ function run(command, args, signal) {
       // this makes it behave as plain node for the spawned CLI (issue #25).
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     })
+    // Decode as one stream, not chunk by chunk: a multi-byte character split
+    // across two pipe chunks came out as replacement characters (issue #110).
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk) => {

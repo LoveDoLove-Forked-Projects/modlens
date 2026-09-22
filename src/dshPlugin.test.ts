@@ -134,6 +134,32 @@ describe('dsh plugin auto-read (phase 2)', () => {
         }
     });
 
+    it('keeps a character split across stdout chunks intact (#110)', async () => {
+        // Dense CJK OCR output crosses the pipe's chunk size, so a 3-byte
+        // character regularly lands on a boundary. The fake CLI forces that:
+        // two writes, the pause making them two chunks, the cut inside 中.
+        const handlers = await load();
+        const cli = fakeCli(`
+            const bytes = Buffer.from(JSON.stringify({ result: { summary: 'S', ocr: { full_text: '中文证据' }, uncertainty: [] } }) + '\\n');
+            const cut = bytes.indexOf(Buffer.from('中')) + 1;
+            process.stdout.write(bytes.subarray(0, cut));
+            setTimeout(() => process.stdout.write(bytes.subarray(cut)), 50);
+        `);
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            const messages = [imageMessage()];
+            const decision = await handlers['agent/pre-step'](
+                { messages, signal: undefined },
+                async () => ({ kind: 'enter', messages }),
+            );
+            const text = decision.messages?.[0].content[1].text ?? '';
+            expect(text).toContain('中文证据');
+            expect(text).not.toContain('�');
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
     it('names the failure when the attachment store returns no data bytes (#17)', async () => {
         // @ts-expect-error untyped on purpose
         const plugin = (await import('../dsh/index.js')) as {
