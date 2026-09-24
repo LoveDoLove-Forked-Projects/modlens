@@ -203,9 +203,12 @@ export function apply(ctx, config = {}) {
   // toJSON, the same stance the LlmAdapter takes: importing a dsh package for
   // it would pin this plugin to one harness version. Harnesses without the
   // settings service never run the closure, and their older settings page
-  // rendered every registered card anyway.
+  // rendered every registered card anyway. 0.1.7 keeps the service but drops
+  // runtime namespaces, since plugin cards moved to the Plugins page, which
+  // dispatches by package name instead (#113): nothing to register there.
   if (config.settingsCard !== false && typeof ctx.inject === 'function') {
     ctx.inject(['settings'], (scope) => {
+      if (typeof scope.settings.register !== 'function') return
       try {
         const passThrough = (value) => ({ ...(value ?? {}) })
         passThrough.toJSON = () => ({

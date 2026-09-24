@@ -112,7 +112,8 @@ profile, the actual model ID rather than its display name, any `upstream` or
 ### Configuring the engine from the web UI
 
 dsh web users have no terminal in front of them, so the engine settings have a
-card in **Settings → Plugins → Plugin configuration**: which engine reads
+card in **Settings → Plugins → Plugin configuration** (from dsh 0.1.7 on, the
+sidebar's **Plugins** page, under `@liustack/modlens` in **Installed**): which engine reads
 images, its key, endpoint, model and proxy route, and which local sign-ins a read may
 borrow. Expanding it probes this machine and lists the harnesses it actually
 found, so the grants are a choice between real options rather than five names.

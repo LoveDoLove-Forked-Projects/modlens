@@ -506,7 +506,7 @@ window.__ModuleLoader__.load({
           }),
         )
 
-      return function ModlensCard() {
+      return function ModlensCard(props) {
         // Subscribed, not sampled: the language is a live setting, and a card
         // sitting open while the user switches has to follow. getSnapshot and
         // subscribe are the pair dsh documents as useSyncExternalStore-safe.
@@ -519,11 +519,15 @@ window.__ModuleLoader__.load({
             ? react.useSyncExternalStore(subscribeLocale, readLocale)
             : readLocale(),
         )
+        // The 0.1.7 Plugins page draws the title and the crumb itself and
+        // passes view: 'page', so there the card is only its form, open from
+        // the start (#113). The Settings card before 0.1.7 keeps its header.
+        var page = props?.view === 'page'
         var openState = react.useState(false)
         var summaryState = react.useState(null)
         var draftState = react.useState(null)
         var noteState = react.useState('')
-        var open = openState[0]
+        var open = page || openState[0]
         var summary = summaryState[0]
         var draft = draftState[0]
         var note = noteState[0]
@@ -1007,6 +1011,8 @@ window.__ModuleLoader__.load({
           }
         }
 
+        if (page) return h('div', null, body)
+
         return h(
           'div',
           {
@@ -1126,6 +1132,13 @@ window.__ModuleLoader__.load({
       var Card = ConfigCard(react, ui, localeRef)
       ctx.slots.inject('settings.plugin.item', function* () {
         yield ctx.slots.register({ name: 'settings.plugin.item', id: 'modlens', key: 'modlens', order: 30 }, Card)
+      })
+      // dsh 0.1.7 moved plugin configuration to the Plugins page, which shows
+      // a bundle's form from plugins.bundle.config keyed by its package name
+      // (#113). slots.inject waits for a slot to be declared, so each host
+      // mounts the card in the one place its settings UI declares.
+      ctx.slots.inject('plugins.bundle.config', function* () {
+        yield ctx.slots.register({ name: 'plugins.bundle.config', key: '@liustack/modlens' }, Card)
       })
     }
 

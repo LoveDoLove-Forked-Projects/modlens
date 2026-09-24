@@ -73,7 +73,7 @@ agy                                                           # sign in, then ex
 
 The install also inventories vision reachable through your other local harness CLIs (Codex, OpenCode, Pi) and asks, per harness, whether modlens may reuse it. Granted logins join the engine pool as equals, and every reused read is labeled with whose quota it spent.
 
-On DeepSeek Harness the command line is not the only way in. Settings → Plugins → Plugin config carries a ModLens card: switch the engine, tick which local CLIs `auto` mode may reuse, hit save and it takes effect.
+On DeepSeek Harness the command line is not the only way in. Settings → Plugins → Plugin config carries a ModLens card (from dsh 0.1.7 on, open the sidebar's Plugins page and pick `@liustack/modlens` under Installed): switch the engine, tick which local CLIs `auto` mode may reuse, hit save and it takes effect.
 
 ![The ModLens vision-engine card in the dsh settings page, shown in Chinese: switch the engine, tick which local CLIs auto mode reuses](https://raw.githubusercontent.com/liustack/modlens/main/assets/demo-dsh-settings-card.jpg)
 

@@ -85,7 +85,7 @@ npx -y @deepseek-ai/dsh plugin --profile web add @liustack/modlens@3.26.3
 
 装完即有 `modlens_read_image` 工具，选「(modlens vision)」模型变体即可直接粘贴识图。引擎配置同样在 `~/.modlens`，详见[宿主接入](docs/harness-setup.zh-CN.md)。
 
-命令行不是唯一入口。dsh 设置页的「插件 → 插件配置」里有一张 ModLens 卡片：切换引擎，勾选 auto 模式可以复用本机哪些 CLI，在网页上点几下保存就生效。
+命令行不是唯一入口。dsh 设置页的「插件 → 插件配置」里有一张 ModLens 卡片（dsh 0.1.7 起改到侧栏的「插件」页，在「已安装」里点开 `@liustack/modlens`）：切换引擎，勾选 auto 模式可以复用本机哪些 CLI，在网页上点几下保存就生效。
 
 ![dsh 设置页里的「视觉引擎（ModLens）」配置卡片：切换引擎，勾选 auto 模式复用的本机 CLI](https://raw.githubusercontent.com/liustack/modlens/main/assets/demo-dsh-settings-card.jpg)
 

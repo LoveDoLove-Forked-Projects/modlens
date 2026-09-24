@@ -687,8 +687,8 @@ describe('settings card (#39)', () => {
                                     // consuming the generator performs the registration
                                 }
                             },
-                            register: (spec: { id: string }) => {
-                                slotRegistrations.push(spec.id);
+                            register: (spec: { name: string }) => {
+                                slotRegistrations.push(spec.name);
                                 slotSpecs.push(spec as unknown as Record<string, unknown>);
                                 return spec;
                             },
@@ -721,7 +721,7 @@ describe('settings card (#39)', () => {
     it('mounts when the route answers', async () => {
         const on = loadCard(200);
         await new Promise((resolve) => setTimeout(resolve, 10));
-        expect(on.slotRegistrations).toEqual(['modlens']);
+        expect(on.slotRegistrations).toEqual(['settings.plugin.item', 'plugins.bundle.config']);
     });
 
     it('asks for the locale service on its own inject, not beside slots', async () => {
@@ -733,7 +733,7 @@ describe('settings card (#39)', () => {
         expect(on.injected).toContainEqual(['locale']);
         expect(on.injected).toContainEqual(['slots']);
         // And the card mounted anyway, with that inject's callback never run.
-        expect(on.slotRegistrations).toEqual(['modlens']);
+        expect(on.slotRegistrations).toEqual(['settings.plugin.item', 'plugins.bundle.config']);
     });
 
     it('registers under the key rc.7 dispatches by and the id rc.6 lists by (#61, #65)', async () => {
@@ -749,6 +749,23 @@ describe('settings card (#39)', () => {
         const spec = on.slotSpecs.find((entry) => entry.name === 'settings.plugin.item');
         expect(spec?.key).toBe('modlens');
         expect(spec?.id).toBe('modlens');
+    });
+
+    it('registers on the 0.1.7 Plugins page under the package name (#113)', async () => {
+        // dsh 0.1.7 moved plugin configuration out of Settings and onto the
+        // Plugins page, whose bundle page renders plugins.bundle.config keyed
+        // by the bundle's package name. The key must be the published name,
+        // or the page never finds the card.
+        const pkg = JSON.parse(
+            fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'),
+        ) as { name: string };
+        const on = loadCard(200);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const spec = on.slotSpecs.find((entry) => entry.name === 'plugins.bundle.config');
+        expect(spec?.key).toBe(pkg.name);
+        // The Settings card rides along for hosts before 0.1.7.
+        expect(on.slotSpecs.map((entry) => entry.name)).toContain('settings.plugin.item');
     });
 
     it('sends only what the save is about', async () => {
@@ -937,6 +954,74 @@ describe('the API key field is masked without being a password field (#56)', () 
         // API key in clear text while they type it.
         expect(secretProps({ supports: () => false }).type).toBe('password');
         expect(secretProps(undefined).type).toBe('password');
+    });
+});
+
+describe('the card as a Plugins page body (#113)', () => {
+    // On the 0.1.7 Plugins page the host draws the title and the crumb and
+    // hands the entry view: 'page'. A collapsed card with its own header
+    // there would be a second title and a click standing between the user
+    // and the form they opened the page for.
+    const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'client.js'), 'utf-8');
+
+    function render(props: Record<string, unknown> | undefined) {
+        let loaded:
+            | {
+                  factory: (require: (id: string) => unknown) => {
+                      __card: {
+                          ConfigCard: (react: unknown, ui: unknown) => (p?: unknown) => unknown;
+                      };
+                  };
+              }
+            | undefined;
+        const fetched: string[] = [];
+        new Function('window', 'document', 'fetch', SOURCE)(
+            {
+                __ModuleLoader__: {
+                    load: (definition: typeof loaded) => {
+                        loaded = definition;
+                    },
+                },
+            },
+            {
+                addEventListener: () => {},
+                removeEventListener: () => {},
+                querySelectorAll: () => [],
+                documentElement: { lang: 'en' },
+            },
+            (url: string) => {
+                fetched.push(url);
+                return new Promise(() => {});
+            },
+        );
+        const built: Array<{ type: unknown; props: Record<string, unknown> }> = [];
+        const react = {
+            createElement: (type: unknown, p: Record<string, unknown>, ...kids: unknown[]) => {
+                built.push({ type, props: p ?? {} });
+                return { type, props: p, kids };
+            },
+            // Every state at its initial value: collapsed, nothing loaded.
+            useState: (initial: unknown) => [initial, () => {}],
+            useEffect: (fn: () => void) => fn(),
+            useCallback: (fn: unknown) => fn,
+        };
+        const Card = (loaded as NonNullable<typeof loaded>)
+            .factory(() => ({}))
+            .__card.ConfigCard(react, { Input: () => null });
+        Card(props);
+        return { built, fetched };
+    }
+
+    it('keeps the collapsible header in Settings', () => {
+        const { built, fetched } = render(undefined);
+        expect(built.some((node) => 'aria-expanded' in node.props)).toBe(true);
+        expect(fetched).toEqual([]);
+    });
+
+    it('opens straight to the form, without a header of its own, on the page', () => {
+        const { built, fetched } = render({ view: 'page' });
+        expect(built.some((node) => 'aria-expanded' in node.props)).toBe(false);
+        expect(fetched).toContain('/modlens/config');
     });
 });
 

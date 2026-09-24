@@ -5748,4 +5748,32 @@ describe('the settings card is dispatchable on rc.7 (#61, #65)', () => {
 
         expect(registered).toEqual([]);
     });
+
+    it('stays quiet where the settings service has no register (#113)', async () => {
+        // dsh 0.1.7 keeps the service name but drops runtime namespaces: the
+        // card moved to the Plugins page, which needs none. Calling register
+        // there threw a TypeError that landed in the log on every boot.
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as {
+            apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+        };
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            plugin.apply(
+                {
+                    tools: { register: () => {} },
+                    attachments: { readImage: async () => ({}) },
+                    on: () => {},
+                    inject: (deps: string[], fn: (scope: unknown) => void) => {
+                        if (deps.includes('settings'))
+                            fn({ settings: { configure: () => () => {} } });
+                    },
+                } as never,
+                {},
+            );
+            expect(errors).not.toHaveBeenCalled();
+        } finally {
+            errors.mockRestore();
+        }
+    });
 });
