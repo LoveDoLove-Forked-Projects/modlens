@@ -965,7 +965,7 @@ describe('the card as a Plugins page body (#113)', () => {
     // and the form they opened the page for.
     const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'dsh', 'client.js'), 'utf-8');
 
-    function render(props: Record<string, unknown> | undefined) {
+    function render(props: Record<string, unknown>) {
         let loaded:
             | {
                   factory: (require: (id: string) => unknown) => {
@@ -1015,7 +1015,7 @@ describe('the card as a Plugins page body (#113)', () => {
     }
 
     it('keeps the collapsible header in Settings', () => {
-        const { built, fetched } = render(undefined);
+        const { built, fetched } = render({});
         expect(built.some((node) => 'aria-expanded' in node.props)).toBe(true);
         expect(fetched).toEqual([]);
     });

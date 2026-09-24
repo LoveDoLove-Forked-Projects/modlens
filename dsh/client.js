@@ -519,7 +519,7 @@ window.__ModuleLoader__.load({
         // The 0.1.7 Plugins page draws the title and the crumb itself and
         // passes view: 'page', so there the card is only its form, open from
         // the start (#113). The Settings card before 0.1.7 keeps its header.
-        var page = props?.view === 'page'
+        var page = props.view === 'page'
         var openState = react.useState(false)
         var summaryState = react.useState(null)
         var draftState = react.useState(null)
