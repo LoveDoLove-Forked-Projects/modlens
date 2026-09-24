@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.26.4 - 2026-09-24
+
+- **dsh 0.1.7: the config card lives on the Plugins page ([#113](https://github.com/liustack/modlens/issues/113)).** dsh 0.1.7 removed `settings.register` and moved plugin configuration out of Settings onto the sidebar's Plugins page. The host half still called `register` without checking, so every boot logged `settings namespace skipped: TypeError`, and the card was gone because nothing rendered the old `settings.plugin.item` slot anymore. The host half now skips the namespace where the settings service has no `register`, and the browser half also registers the card in `plugins.bundle.config` under the package name, so on 0.1.7 the form shows on the `@liustack/modlens` page under Installed. There the page draws the title itself, so the card renders as the bare form, open from the start. Hosts before 0.1.7 keep the Settings card unchanged, and each host only declares one of the two slots, so the card never shows twice. Verified in the browser on dsh 0.1.7-rc.1. Thanks to @The-five-stooges.
+
 ## 3.26.3 - 2026-09-23
 
 - **dsh: CJK evidence no longer turns into replacement characters ([#110](https://github.com/liustack/modlens/issues/110)).** The plugin's child-process runner appended each stdout chunk to a string, which decodes every chunk on its own, so a multi-byte character split across two pipe chunks came out as replacement characters (U+FFFD). The result still parsed as JSON, so both vision paths (the `modlens_read_image` tool and the paste conversion) could hand the model damaged transcription text with no error anywhere. Dense Chinese OCR output crosses the pipe's chunk size routinely. The runner now decodes stdout and stderr as one UTF-8 stream, the same fix the CLI's own children got earlier, and a regression test drives a fake CLI that cuts a character in half between two writes. Thanks to @nanami-0713.
