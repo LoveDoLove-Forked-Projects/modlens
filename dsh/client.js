@@ -262,6 +262,7 @@ window.__ModuleLoader__.load({
         autoHint: 'Reuse the vision engines already on this machine.',
         notLoggedIn: 'found, not signed in',
         loadFailed: 'load failed',
+        retry: 'Retry',
         saveFailed: 'save failed',
         envSourced:
           'These come from environment variables. Saving copies them into the config file, which then becomes this engine’s only source.',
@@ -298,6 +299,7 @@ window.__ModuleLoader__.load({
         autoHint: '自动复用本机已有视觉引擎。',
         notLoggedIn: '已找到，未登录',
         loadFailed: '加载失败',
+        retry: '重试',
         saveFailed: '保存失败',
         envSourced: '这些值来自环境变量。保存会把它们写进配置文件，此后该引擎只认配置文件。',
       },
@@ -624,6 +626,34 @@ window.__ModuleLoader__.load({
                 },
               },
               note || t.loading,
+              // A failed load needs a way back that is not collapse-and-expand:
+              // the Plugins page has no header to collapse.
+              note
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      onClick: () => {
+                        noteState[1]('')
+                        load()
+                      },
+                      style: {
+                        appearance: 'none',
+                        font: 'inherit',
+                        fontSize: '13px',
+                        marginLeft: '10px',
+                        cursor: 'pointer',
+                        border: 0,
+                        padding: 0,
+                        background: 'none',
+                        color: 'var(--dsw-alias-label-secondary, inherit)',
+                        textDecoration: 'underline',
+                        textUnderlineOffset: '2px',
+                      },
+                    },
+                    t.retry,
+                  )
+                : null,
             )
           } else {
             var keyless = (summary.keyless || []).indexOf(draft.provider) >= 0

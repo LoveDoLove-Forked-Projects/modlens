@@ -1834,6 +1834,22 @@ describe('settings card progressive discovery (#83)', () => {
         expect(other.texts()).toContain('Engine');
     });
 
+    it('offers a retry after a failed load, where there is no header to reopen', async () => {
+        // On the 0.1.7 Plugins page the form is open from the start, so the
+        // collapse-and-expand that used to retry a failed load does not exist.
+        const card = mount({ deferConfig: true, props: { view: 'page' } });
+        card.rejectConfig(0, new Error('config file is not valid JSON'));
+        await flush();
+
+        expect(card.texts()).toContain('config file is not valid JSON');
+        card.clickButton('Retry');
+        card.resolveConfig(1, { ...CONFIG });
+        await flush();
+
+        expect(card.texts()).toContain('Engine');
+        expect(card.texts()).not.toContain('Retry');
+    });
+
     it('renders the engine form while local-agent discovery is still in flight', async () => {
         const card = mount();
         card.expand();
