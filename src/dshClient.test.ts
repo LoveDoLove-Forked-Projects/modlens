@@ -674,6 +674,7 @@ describe('settings card (#39)', () => {
             useState: (initial: unknown) => [initial, () => {}],
             useEffect: () => {},
             useCallback: (fn: unknown) => fn,
+            useRef: (initial: unknown) => ({ current: initial }),
         }));
         exports.apply({
             effect: () => {},
@@ -1004,6 +1005,7 @@ describe('the card as a Plugins page body (#113)', () => {
             useState: (initial: unknown) => [initial, () => {}],
             useEffect: (fn: () => void) => fn(),
             useCallback: (fn: unknown) => fn,
+            useRef: (initial: unknown) => ({ current: initial }),
         };
         const Card = (loaded as NonNullable<typeof loaded>)
             .factory(() => ({}))
@@ -1037,7 +1039,9 @@ describe('the rendered API key field, not just the helper (#56)', () => {
         let loaded:
             | {
                   factory: (require: (id: string) => unknown) => {
-                      __card: { ConfigCard: (react: unknown, ui: unknown) => () => unknown };
+                      __card: {
+                          ConfigCard: (react: unknown, ui: unknown) => (props: unknown) => unknown;
+                      };
                   };
               }
             | undefined;
@@ -1081,6 +1085,7 @@ describe('the rendered API key field, not just the helper (#56)', () => {
             useState: () => [states[index++ % states.length], () => {}],
             useEffect: () => {},
             useCallback: (fn: unknown) => fn,
+            useRef: (initial: unknown) => ({ current: initial }),
         };
         const Input = function Input() {
             return null;
@@ -1088,7 +1093,7 @@ describe('the rendered API key field, not just the helper (#56)', () => {
         const Card = (loaded as NonNullable<typeof loaded>)
             .factory(() => ({}))
             .__card.ConfigCard(react, { Input });
-        Card();
+        Card({});
         return built.filter((node) => node.type === Input);
     }
 
@@ -1145,7 +1150,9 @@ describe('a failed load or save speaks the reader’s language', () => {
         let loaded:
             | {
                   factory: (require: (id: string) => unknown) => {
-                      __card: { ConfigCard: (react: unknown, ui: unknown) => () => unknown };
+                      __card: {
+                          ConfigCard: (react: unknown, ui: unknown) => (props: unknown) => unknown;
+                      };
                   };
               }
             | undefined;
@@ -1202,6 +1209,7 @@ describe('a failed load or save speaks the reader’s language', () => {
                 fn();
             },
             useCallback: (fn: unknown) => fn,
+            useRef: (initial: unknown) => ({ current: initial }),
         };
         const Input = function Input() {
             return null;
@@ -1209,7 +1217,7 @@ describe('a failed load or save speaks the reader’s language', () => {
         const Card = (loaded as NonNullable<typeof loaded>)
             .factory(() => ({}))
             .__card.ConfigCard(react, { Input });
-        Card();
+        Card({});
         return { notes, nodes };
     }
 
@@ -1328,7 +1336,7 @@ describe('the card follows dsh’s own interface language', () => {
                               react: unknown,
                               ui: unknown,
                               localeRef?: unknown,
-                          ) => () => unknown;
+                          ) => (props: unknown) => unknown;
                       };
                   };
               }
@@ -1364,6 +1372,7 @@ describe('the card follows dsh’s own interface language', () => {
             useState: (initial: unknown) => [initial, () => {}],
             useEffect: () => {},
             useCallback: (fn: unknown) => fn,
+            useRef: (initial: unknown) => ({ current: initial }),
             useSyncExternalStore: (
                 subscribe: (onChange: () => void) => () => void,
                 getSnapshot: () => unknown,
@@ -1374,7 +1383,7 @@ describe('the card follows dsh’s own interface language', () => {
                     subscribe(() => {
                         state.renders += 1;
                         state.texts = [];
-                        Card();
+                        Card({});
                     });
                 }
                 return getSnapshot();
@@ -1390,7 +1399,7 @@ describe('the card follows dsh’s own interface language', () => {
                 { Input },
                 options.locale ? { current: options.locale } : undefined,
             );
-        Card();
+        Card({});
         return state;
     }
 
@@ -1476,8 +1485,12 @@ describe('settings card progressive discovery (#83)', () => {
         selectedProxyMode: () => string;
         buttonDisabled: (label: string) => boolean;
         resolveConfig: (request: number, body: unknown) => void;
+        rejectConfig: (request: number, error: Error) => void;
         resolveDiscover: (body: unknown) => void;
         resolveSave: (body: unknown) => void;
+        clickButton: (label: string) => void;
+        /** A second instance of the same built card, with hooks of its own. */
+        twin: (props?: Record<string, unknown>) => { texts: () => string[]; expand: () => void };
     }
 
     function depsEqual(left?: unknown[], right?: unknown[]): boolean {
@@ -1534,11 +1547,19 @@ describe('settings card progressive discovery (#83)', () => {
         for (let i = 0; i < 20; i++) await Promise.resolve();
     }
 
-    function mount(options: { deferConfig?: boolean; deferSave?: boolean } = {}): Progressive {
+    function mount(
+        options: {
+            deferConfig?: boolean;
+            deferSave?: boolean;
+            props?: Record<string, unknown>;
+        } = {},
+    ): Progressive {
         let loaded:
             | {
                   factory: (require: (id: string) => unknown) => {
-                      __card: { ConfigCard: (react: unknown, ui: unknown) => () => unknown };
+                      __card: {
+                          ConfigCard: (react: unknown, ui: unknown) => (props: unknown) => unknown;
+                      };
                   };
               }
             | undefined;
@@ -1566,6 +1587,7 @@ describe('settings card progressive discovery (#83)', () => {
             resolveSave = resolve;
         });
         const configResolvers: Array<(body: unknown) => void> = [];
+        const configRejecters: Array<(error: Error) => void> = [];
 
         const fetchStub = (url: string, init?: { method?: string; body?: unknown }) => {
             fetchCalls.push({ url, init });
@@ -1583,7 +1605,10 @@ describe('settings card progressive discovery (#83)', () => {
                 }));
             }
             const body = options.deferConfig
-                ? new Promise<unknown>((resolve) => configResolvers.push(resolve))
+                ? new Promise<unknown>((resolve, reject) => {
+                      configResolvers.push(resolve);
+                      configRejecters.push(reject);
+                  })
                 : Promise.resolve({ ...CONFIG });
             return body.then((next) => ({
                 ok: true,
@@ -1600,24 +1625,34 @@ describe('settings card progressive discovery (#83)', () => {
         );
 
         type Hook = { value: unknown; deps?: unknown[] };
-        const hooks: Hook[] = [];
-        let hookIndex = 0;
-        const pendingEffects: Array<{ index: number; fn: () => void; deps?: unknown[] }> = [];
-        let root: unknown;
-        let Card: () => unknown;
+        // One hook list per mounted instance. The react stub is handed to
+        // ConfigCard once, as dsh does, so it reads the instance being
+        // rendered through `current`.
+        interface Instance {
+            hooks: Hook[];
+            hookIndex: number;
+            pendingEffects: Array<{ index: number; fn: () => void; deps?: unknown[] }>;
+            root: unknown;
+            props?: Record<string, unknown>;
+        }
+        let current!: Instance;
+        let Card: (props?: Record<string, unknown>) => unknown;
 
-        const rerender = () => {
-            hookIndex = 0;
-            pendingEffects.length = 0;
-            root = Card();
-            const scheduled = pendingEffects.slice();
-            pendingEffects.length = 0;
+        const rerender = (instance: Instance) => {
+            const previous = current;
+            current = instance;
+            instance.hookIndex = 0;
+            instance.pendingEffects.length = 0;
+            instance.root = Card(instance.props);
+            const scheduled = instance.pendingEffects.slice();
+            instance.pendingEffects.length = 0;
             for (const effect of scheduled) {
-                const prev = hooks[effect.index];
+                const prev = instance.hooks[effect.index];
                 const changed = !prev || !depsEqual(prev.deps, effect.deps);
-                hooks[effect.index] = { value: undefined, deps: effect.deps };
+                instance.hooks[effect.index] = { value: undefined, deps: effect.deps };
                 if (changed) effect.fn();
             }
+            current = previous ?? instance;
         };
 
         const react = {
@@ -1626,28 +1661,39 @@ describe('settings card progressive discovery (#83)', () => {
                 return node;
             },
             useState: (initial: unknown) => {
-                const index = hookIndex++;
-                if (hooks[index] === undefined) hooks[index] = { value: initial };
+                const instance = current;
+                const index = instance.hookIndex++;
+                if (instance.hooks[index] === undefined) instance.hooks[index] = { value: initial };
                 const setState = (update: unknown) => {
-                    const prev = hooks[index].value;
-                    hooks[index].value =
+                    const prev = instance.hooks[index].value;
+                    instance.hooks[index].value =
                         typeof update === 'function'
                             ? (update as (p: unknown) => unknown)(prev)
                             : update;
-                    rerender();
+                    rerender(instance);
                 };
-                return [hooks[index].value, setState];
+                return [instance.hooks[index].value, setState];
+            },
+            useRef: (initial: unknown) => {
+                const instance = current;
+                const index = instance.hookIndex++;
+                if (instance.hooks[index] === undefined) {
+                    instance.hooks[index] = { value: { current: initial } };
+                }
+                return instance.hooks[index].value;
             },
             useCallback: (fn: unknown, deps?: unknown[]) => {
-                const index = hookIndex++;
-                const prev = hooks[index];
+                const instance = current;
+                const index = instance.hookIndex++;
+                const prev = instance.hooks[index];
                 if (prev && depsEqual(prev.deps, deps)) return prev.value;
-                hooks[index] = { value: fn, deps };
+                instance.hooks[index] = { value: fn, deps };
                 return fn;
             },
             useEffect: (fn: () => void, deps?: unknown[]) => {
-                const index = hookIndex++;
-                pendingEffects.push({ index, fn, deps });
+                const instance = current;
+                const index = instance.hookIndex++;
+                instance.pendingEffects.push({ index, fn, deps });
             },
         };
 
@@ -1659,16 +1705,24 @@ describe('settings card progressive discovery (#83)', () => {
             .__card.ConfigCard(react, {
                 Input,
             });
-        rerender();
+        const newInstance = (props?: Record<string, unknown>): Instance => ({
+            hooks: [],
+            hookIndex: 0,
+            pendingEffects: [],
+            root: undefined,
+            props: props ?? {},
+        });
+        const main = newInstance(options.props);
+        rerender(main);
 
         const clickToggle = () => {
-            const button = findToggle(root);
+            const button = findToggle(main.root);
             if (!button) throw new Error('no expand/collapse button');
             (button.props.onClick as () => void)();
         };
         const find = (predicate: (node: Node) => boolean, message: string): Node => {
             let found: Node | undefined;
-            walk(root, (node) => {
+            walk(main.root, (node) => {
                 if (!found && predicate(node)) found = node;
             });
             if (!found) throw new Error(message);
@@ -1676,7 +1730,7 @@ describe('settings card progressive discovery (#83)', () => {
         };
 
         return {
-            texts: () => textsOf(root),
+            texts: () => textsOf(main.root),
             expand: clickToggle,
             collapse: clickToggle,
             changeProvider: (provider: string) => {
@@ -1734,10 +1788,51 @@ describe('settings card progressive discovery (#83)', () => {
                 if (!resolve) throw new Error(`no config request ${request}`);
                 resolve(body);
             },
+            rejectConfig: (request: number, error: Error) => {
+                const reject = configRejecters[request];
+                if (!reject) throw new Error(`no config request ${request}`);
+                reject(error);
+            },
             resolveDiscover: (body: unknown) => resolveDiscover(body),
             resolveSave: (body: unknown) => resolveSave(body),
+            clickButton: (label: string) => {
+                const button = find(
+                    (node) => node.type === 'button' && textsOf(node.kids).includes(label),
+                    `no ${label} button`,
+                );
+                (button.props.onClick as () => void)();
+            },
+            twin: (props?: Record<string, unknown>) => {
+                const other = newInstance(props);
+                rerender(other);
+                return {
+                    texts: () => textsOf(other.root),
+                    expand: () => {
+                        const button = findToggle(other.root);
+                        if (!button) throw new Error('no expand/collapse button');
+                        (button.props.onClick as () => void)();
+                    },
+                };
+            },
         };
     }
+
+    it('keeps each mounted card’s load its own', async () => {
+        // One built card is registered into two slots. A load counter shared
+        // by every instance let a second card's load void the first card's,
+        // which then showed "loading" for good.
+        const card = mount({ deferConfig: true });
+        card.expand();
+        const other = card.twin();
+        other.expand();
+
+        card.resolveConfig(0, { ...CONFIG });
+        card.resolveConfig(1, { ...CONFIG });
+        await flush();
+
+        expect(card.texts()).toContain('Engine');
+        expect(other.texts()).toContain('Engine');
+    });
 
     it('renders the engine form while local-agent discovery is still in flight', async () => {
         const card = mount();

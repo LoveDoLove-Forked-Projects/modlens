@@ -461,11 +461,6 @@ window.__ModuleLoader__.load({
     function ConfigCard(react, ui, localeRef) {
       var h = react.createElement
       var Input = ui.Input
-      // Each load claims a generation. Collapsing before the config arrives
-      // invalidates that load because reopening starts a fresh one. Once the
-      // form exists, its in-flight discovery stays relevant across collapse.
-      // The counter survives renders because ConfigCard is built once.
-      var gen = 0
 
       // Built once per card so useSyncExternalStore is not handed a new
       // subscribe on every render, which would resubscribe every render.
@@ -527,6 +522,12 @@ window.__ModuleLoader__.load({
         var summaryState = react.useState(null)
         var draftState = react.useState(null)
         var noteState = react.useState('')
+        // Each load claims a generation. Collapsing before the config arrives
+        // invalidates that load because reopening starts a fresh one. Once the
+        // form exists, its in-flight discovery stays relevant across collapse.
+        // The counter belongs to this mounted card: one built card serves two
+        // slots, and a shared counter let one mount void the other's load.
+        var gen = react.useRef(0)
         var open = page || openState[0]
         var summary = summaryState[0]
         var draft = draftState[0]
@@ -538,7 +539,7 @@ window.__ModuleLoader__.load({
           // Config first, so the engine form can render. Discovery is the
           // self-check probing which local harnesses exist to be borrowed,
           // paid after the form is up, cached host-side.
-          var id = ++gen
+          var id = ++gen.current
           fetch('/modlens/config')
             .then((r) =>
               r.json().then((body) => {
@@ -547,7 +548,7 @@ window.__ModuleLoader__.load({
               }),
             )
             .then((next) => {
-              if (id !== gen) return
+              if (id !== gen.current) return
               summaryState[1](next)
               draftState[1](seed(next, next.provider))
               noteState[1]('')
@@ -559,7 +560,7 @@ window.__ModuleLoader__.load({
                   }),
                 )
                 .then((discovered) => {
-                  if (id !== gen) return
+                  if (id !== gen.current) return
                   summaryState[1]((prev) => {
                     if (!prev) return prev
                     var merged = Object.assign({}, prev)
@@ -568,7 +569,7 @@ window.__ModuleLoader__.load({
                   })
                 })
                 .catch(() => {
-                  if (id !== gen) return
+                  if (id !== gen.current) return
                   summaryState[1]((prev) => {
                     if (!prev) return prev
                     var merged = Object.assign({}, prev)
@@ -578,7 +579,7 @@ window.__ModuleLoader__.load({
                 })
             })
             .catch((error) => {
-              if (id !== gen) return
+              if (id !== gen.current) return
               noteState[1](noteFrom(error, t.loadFailed))
             })
         }, [])
@@ -1031,7 +1032,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               'aria-expanded': open,
               onClick: () => {
-                if (open && summary === null) gen += 1
+                if (open && summary === null) gen.current += 1
                 openState[1](!open)
               },
               style: {
