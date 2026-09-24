@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.26.5 - 2026-09-24
+
+- **dsh: the config card retries a failed load in place.** On the dsh 0.1.7 Plugins page the form opens without a header, so collapse and expand, which used to retry a failed load, no longer exists there. A failed load (a malformed `~/.modlens/config.json`, say) now shows a Retry control beside the error, in the Settings card too. The control stays flush left when a long error wraps it onto its own line.
+- **dsh: each mounted config card keeps its own loads.** One built card serves both the Settings slot and the 0.1.7 Plugins page slot, and the counter that discards stale loads lived on the built card. Had a host ever mounted both at once, one mount's load would have voided the other's and left it on "loading" for good. No released dsh declares both slots, so this never reached users. The counter now belongs to each mount.
+- **Docs:** from dsh 0.1.7 on, opening the Plugins page is what probes this machine for reusable harnesses. There is no expand step there anymore.
+
 ## 3.26.4 - 2026-09-24
 
 - **dsh 0.1.7: the config card lives on the Plugins page ([#113](https://github.com/liustack/modlens/issues/113)).** dsh 0.1.7 removed `settings.register` and moved plugin configuration out of Settings onto the sidebar's Plugins page. The host half still called `register` without checking, so every boot logged `settings namespace skipped: TypeError`, and the card was gone because nothing rendered the old `settings.plugin.item` slot anymore. The host half now skips the namespace where the settings service has no `register`, and the browser half also registers the card in `plugins.bundle.config` under the package name, so on 0.1.7 the form shows on the `@liustack/modlens` page under Installed. There the page draws the title itself, so the card renders as the bare form, open from the start. Hosts before 0.1.7 keep the Settings card unchanged, and each host only declares one of the two slots, so the card never shows twice. Verified in the browser on dsh 0.1.7-rc.1. Thanks to @The-five-stooges.
