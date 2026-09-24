@@ -627,7 +627,10 @@ window.__ModuleLoader__.load({
               },
               note || t.loading,
               // A failed load needs a way back that is not collapse-and-expand:
-              // the Plugins page has no header to collapse.
+              // the Plugins page has no header to collapse. The gap is a plain
+              // space, so a long error that wraps the control onto its own line
+              // does not leave it indented.
+              note ? ' ' : null,
               note
                 ? h(
                     'button',
@@ -641,7 +644,6 @@ window.__ModuleLoader__.load({
                         appearance: 'none',
                         font: 'inherit',
                         fontSize: '13px',
-                        marginLeft: '10px',
                         cursor: 'pointer',
                         border: 0,
                         padding: 0,
