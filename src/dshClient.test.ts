@@ -1838,11 +1838,18 @@ describe('settings card progressive discovery (#83)', () => {
         // On the 0.1.7 Plugins page the form is open from the start, so the
         // collapse-and-expand that used to retry a failed load does not exist.
         const card = mount({ deferConfig: true, props: { view: 'page' } });
+        // Nothing has failed yet, so there is nothing to retry.
+        expect(card.texts()).toContain('loading...');
+        expect(card.texts()).not.toContain('Retry');
         card.rejectConfig(0, new Error('config file is not valid JSON'));
         await flush();
 
         expect(card.texts()).toContain('config file is not valid JSON');
         card.clickButton('Retry');
+        // The retry is under way: the old failure and its control step aside.
+        expect(card.texts()).toContain('loading...');
+        expect(card.texts()).not.toContain('Retry');
+        expect(card.texts()).not.toContain('config file is not valid JSON');
         card.resolveConfig(1, { ...CONFIG });
         await flush();
 
