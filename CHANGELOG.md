@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.27.0 - 2026-10-16
+
+- **dsh: reread a pasted image with a new focus ([#121](https://github.com/liustack/modlens/issues/121)).** Paste evidence carried no handle back to the image, so a model that wanted a second look (say, the axis labels) could only guess at files in the attachment store. The evidence now has an `attachment-id: sha256:…` line, and `modlens_read_image` takes that id as its `path`, so the plugin pulls the bytes from the attachment store and reads them again with the given `prompt`. Only images this plugin read in the session resolve (the 256 most recent in the history being sent). An unknown id gets a fixed error asking for the file instead, and never echoes what the model passed. No host path goes on the wire: the store layout is dsh's own, and the path carries the user's home directory. Thanks to @cutefelix.
+
 ## 3.26.6 - 2026-10-04
 
 - **dsh: a route still starting up at boot gets wrapped once it is ready ([#116](https://github.com/liustack/modlens/issues/116)).** Auto-discovery only swept on `llm/adapters-updated`. An account route registers once per boot, and if the sweep probed it while it was still initializing (`listModels` threw or listed nothing yet), the plugin let go of it and waited for the next topology change. On a quiet machine that change never came, so the `modlens-*` wrapper stayed missing until something unrelated touched the registry. A sweep that leaves a route unresolved now runs again after 5 seconds, 30 seconds and 2 minutes. A topology event starts that round over, and unloading the plugin cancels a pending retry. A route that simply has nothing to wrap costs three extra probes, not endless polling. Thanks to @Ztyss for instrumenting a live host down to the exact branch that lost the wakeup.
