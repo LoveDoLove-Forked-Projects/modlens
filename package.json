@@ -4,7 +4,7 @@
     "description": "Plug-in vision for text-only LLMs, powered by the free Antigravity CLI",
     "type": "module",
     "bin": {
-        "modlens": "./dist/main.js"
+        "modlens": "dist/main.js"
     },
     "scripts": {
         "dev": "vite build --watch",
