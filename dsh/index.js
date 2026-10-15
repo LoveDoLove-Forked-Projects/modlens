@@ -107,6 +107,64 @@ function cachedToolRead(cache, key, remote, load) {
   return promise
 }
 
+/**
+ * The vision result from one finished CLI run, or an error the model can read:
+ * the exit code with the head of stderr, or the head of a non-JSON answer.
+ * Shared by every way the plugin runs the CLI so they fail alike.
+ */
+function parseCliResult({ stdout, stderr, code }) {
+  if (code !== 0) {
+    throw new Error(`modlens failed (exit ${code}): ${(stderr || stdout).trim().slice(0, 500)}`)
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    throw new Error(`modlens produced no JSON: ${stdout.trim().slice(0, 300)}`)
+  }
+  // The canonical value is the vision result itself; routing details
+  // (meta.attempts, whose quota a reused engine spent) stay operational.
+  return parsed.result
+}
+
+// A dsh attachment id as the local store mints it: the sha256 of the stored
+// bytes. The value comes from the host store and is written into evidence
+// text that goes on the wire, so only this exact shape is ever echoed: a
+// newline or other free text in it would be a fake turn boundary.
+const ATTACHMENT_ID = /^sha256:[0-9a-f]{64}$/
+// What the tool treats as an id rather than a path. Wider than ATTACHMENT_ID
+// on purpose, so a mangled id gets the clear refusal instead of a missing
+// file error from the CLI.
+const ATTACHMENT_ID_PREFIX = /^sha256:/i
+const ATTACHMENT_REF_LIMIT = 256
+// Success evidence block to the ref whose id it names. The cache hands out
+// these frozen blocks, so the block itself carries the id back to the record.
+const NAMED_EVIDENCE = new WeakMap()
+
+/**
+ * Record a ref this plugin read, keyed by its id, so the tool can read the
+ * same bytes again when the model asks for a new focus (#121). Map insertion
+ * order is the LRU order, the same as the tool read cache.
+ */
+function rememberAttachmentRef(refs, ref) {
+  const id = ref?.attachmentId
+  if (typeof id !== 'string' || !ATTACHMENT_ID.test(id)) return
+  refs.delete(id)
+  refs.set(id, ref)
+  while (refs.size > ATTACHMENT_REF_LIMIT) {
+    refs.delete(refs.keys().next().value)
+  }
+}
+
+function lookupAttachmentRef(refs, id) {
+  const ref = refs.get(id)
+  if (ref !== undefined) {
+    refs.delete(id)
+    refs.set(id, ref)
+  }
+  return ref
+}
+
 export const name = 'modlens'
 export const inject = ['tools', 'agents', 'attachments', 'llm']
 
@@ -129,11 +187,14 @@ export function apply(ctx, config = {}) {
   // Keep their completed evidence beside the attachment cache so the model's
   // repeated decision does not become repeated vision-provider work (#81).
   const toolReadCache = new Map()
+  // The attachments behind the evidence this plugin wrote, by id, so the
+  // tool can re-read a pasted image with a new focus (#121).
+  const attachmentRefs = new Map()
   // Off by default since the vision provider converts at request time and
   // keeps the durable log (and the UI thumbnail) intact; turn it on only for
   // setups where images enter through a provider this plugin does not wrap.
   if (config.autoRead === true) {
-    registerAutoRead(ctx, evidenceCache)
+    registerAutoRead(ctx, evidenceCache, attachmentRefs)
   }
   // The provider ids this plugin registered itself. The takeover verdict has
   // to skip them: our wrapper models are synthetic twins of upstream ones,
@@ -152,10 +213,10 @@ export function apply(ctx, config = {}) {
     // keep the dependency-free plugin's former feature-detected path.
     if (typeof ctx.inject === 'function') {
       ctx.inject(['llm'], (scope) => {
-        return registerVisionProvider(scope, config, ownProviders, evidenceCache)
+        return registerVisionProvider(scope, config, ownProviders, evidenceCache, attachmentRefs)
       })
     } else {
-      registerVisionProvider(ctx, config, ownProviders, evidenceCache)
+      registerVisionProvider(ctx, config, ownProviders, evidenceCache, attachmentRefs)
     }
   }
   // Paste-to-path: the browser half (dsh/client.js) intercepts image pastes
@@ -234,13 +295,14 @@ export function apply(ctx, config = {}) {
   const readImageTool = (toolName) => ({
     name: toolName,
     description:
-      'Read an image through the modlens vision bridge. Use whenever a message references an image the current model cannot see: a local file path or an http(s) URL to a screenshot, photo, chart, diagram, or document scan. Returns structured evidence with every word transcribed (ocr.full_text), layout regions in reading order, semantics, and an uncertainty list. Quote the evidence instead of guessing. For the same image and focus, call this tool once and reuse its returned evidence instead of calling again. Requires a configured modlens engine (run `npx @liustack/modlens doctor` in a terminal to check).',
+      'Read an image through the modlens vision bridge. Use whenever a message references an image the current model cannot see: a local file path or an http(s) URL to a screenshot, photo, chart, diagram, or document scan. Returns structured evidence with every word transcribed (ocr.full_text), layout regions in reading order, semantics, and an uncertainty list. Quote the evidence instead of guessing. For the same image and focus, call this tool once and reuse its returned evidence instead of calling again. Evidence for a pasted image carries an `attachment-id:` line: to read that image again with a new focus, pass the id as path, and do not search the filesystem for the file. Requires a configured modlens engine (run `npx @liustack/modlens doctor` in a terminal to check).',
     parameters: {
       type: 'object',
       properties: {
         path: {
           type: 'string',
-          description: 'Absolute local file path or http(s) URL of the image',
+          description:
+            'Absolute local file path, http(s) URL, or the attachment-id (sha256:...) from pasted-image evidence',
         },
         prompt: {
           type: 'string',
@@ -261,7 +323,9 @@ export function apply(ctx, config = {}) {
       title: toolName,
       kind: 'read',
       rawInput: args,
-      ...(typeof args?.path === 'string' && !/^https?:\/\//i.test(args.path)
+      ...(typeof args?.path === 'string' &&
+      !/^https?:\/\//i.test(args.path) &&
+      !ATTACHMENT_ID_PREFIX.test(args.path.trim())
         ? { locations: [{ path: args.path }] }
         : {}),
     }),
@@ -269,8 +333,31 @@ export function apply(ctx, config = {}) {
       if (typeof args?.path !== 'string' || args.path.trim() === '') {
         throw new Error(`${toolName} needs a non-empty string "path".`)
       }
+      const focus = typeof args.prompt === 'string' ? args.prompt : ''
+      const source = args.path.trim()
+      if (ATTACHMENT_ID_PREFIX.test(source)) {
+        // A pasted image named by the id in its evidence (#121). Checked
+        // before the cache, so an id that becomes known later is not stuck
+        // behind a cached refusal.
+        const ref = lookupAttachmentRef(attachmentRefs, source)
+        if (ref === undefined) {
+          // The path is model text and goes back on the wire: only a strict
+          // id is echoed, anything else gets the fixed sentence alone.
+          const named = ATTACHMENT_ID.test(source) ? ` ${source}` : ''
+          throw new Error(
+            `${toolName}: the attachment-id${named} is not an image read in this session. Do not search the filesystem for it, ask the user to attach the image again or give its file path.`,
+          )
+        }
+        // The id is the sha256 of the stored bytes, so it is the identity.
+        const cacheKey = JSON.stringify([`attachment:${source}`, focus])
+        const pending = cachedToolRead(toolReadCache, cacheKey, false, async () => {
+          const stored = await readStoredImage(ctx.attachments, ref, undefined)
+          return readImageBytes(stored.data, storedImageExt(stored, ref), focus, undefined)
+        })
+        return structuredClone(await abortableWait(pending, exec.signal))
+      }
       const sourceKey = toolReadSourceKey(args.path)
-      const cacheKey = JSON.stringify([sourceKey, typeof args.prompt === 'string' ? args.prompt : ''])
+      const cacheKey = JSON.stringify([sourceKey, focus])
       const pending = cachedToolRead(toolReadCache, cacheKey, sourceKey.startsWith('remote:'), async () => {
         const cliArgs = [CLI_PATH, '-i', args.path, '--timeout', String(CLI_TIMEOUT_MS)]
         if (args.prompt) {
@@ -279,19 +366,7 @@ export function apply(ctx, config = {}) {
         // The shared read has the CLI's own deadline but not one caller's
         // signal. A caller may stop waiting without cancelling every other
         // concurrent caller that joined the same image read.
-        const { stdout, stderr, code } = await run(process.execPath, cliArgs, undefined)
-        if (code !== 0) {
-          throw new Error(`modlens failed (exit ${code}): ${(stderr || stdout).trim().slice(0, 500)}`)
-        }
-        let parsed
-        try {
-          parsed = JSON.parse(stdout)
-        } catch {
-          throw new Error(`modlens produced no JSON: ${stdout.trim().slice(0, 300)}`)
-        }
-        // The canonical value is the vision result itself; routing details
-        // (meta.attempts, whose quota a reused engine spent) stay operational.
-        return parsed.result
+        return parseCliResult(await run(process.execPath, cliArgs, undefined))
       })
       return structuredClone(await abortableWait(pending, exec.signal))
     },
@@ -668,7 +743,7 @@ function restoreUpstreamSource(messages, wrapperId, upstream) {
   return changed ? out : messages
 }
 
-function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
+function registerVisionProvider(ctx, config, ownProviders, evidenceCache, attachmentRefs) {
   // Wrap only the text-only members of these families. Their own vision
   // models (present or future: deepseek-vl/ocr/janus, glm-4.5v, glm-5v-...,
   // glm-5.3-flash, deepseek-v4-flash-vision-exp) need no bridge and are
@@ -860,6 +935,7 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
           })()
         },
         evidenceCache,
+        attachmentRefs,
       })
       registrations.set(upstream, { providerId, registration, state })
       // Trusted as ours only on a registration this call actually made. A
@@ -1206,6 +1282,13 @@ function evidenceKey(value) {
 }
 
 function cachedEvidence(ctx, adapter, block, walk) {
+  // Every time evidence naming an id is handed out, hit or miss, the id goes
+  // back into the record, so the record follows the history being sent
+  // rather than only first reads (#121). Failure blocks name nothing.
+  const remember = (evidence) => {
+    rememberAttachmentRef(adapter.attachmentRefs, NAMED_EVIDENCE.get(evidence))
+    return evidence
+  }
   const key = evidenceKey(block.attachment ?? block)
   // Everything the current walk touches is pinned for the walk's duration:
   // eviction picks victims outside the union of every open walk, or nothing.
@@ -1217,7 +1300,7 @@ function cachedEvidence(ctx, adapter, block, walk) {
       // Refresh recency: Map iteration order is insertion order.
       adapter.evidenceCache.delete(key)
       adapter.evidenceCache.set(key, hit)
-      return cooling ? Promise.resolve(hit.block) : hit
+      return cooling ? Promise.resolve(hit.block) : hit.then(remember)
     }
     // Cooldown over: fall through into one fresh probe.
   }
@@ -1256,7 +1339,7 @@ function cachedEvidence(ctx, adapter, block, walk) {
   )
   adapter.evidenceCache.set(key, pending)
   trimEvidenceCache(adapter.evidenceCache)
-  return pending
+  return pending.then(remember)
 }
 
 /**
@@ -1437,7 +1520,7 @@ async function convertImagesToEvidence(ctx, messages, signal, adapter) {
  * injectors) see and shape the same final message set; a failed read degrades
  * to an explanatory text block instead of rejecting the step.
  */
-function registerAutoRead(ctx, evidenceCache) {
+function registerAutoRead(ctx, evidenceCache, attachmentRefs) {
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind !== 'enter') {
@@ -1459,7 +1542,7 @@ function registerAutoRead(ctx, evidenceCache) {
         const content = await convertBlocks(message.content, (block) =>
           // The same cache the wrapper routes use: auto-read used to re-read
           // every image on every step, healthy engine or not (issue #68).
-          abortableWait(cachedEvidence(ctx, { evidenceCache }, block, walk), payload.signal),
+          abortableWait(cachedEvidence(ctx, { evidenceCache, attachmentRefs }, block, walk), payload.signal),
         )
         messages.push({ ...message, content })
       }
@@ -1494,10 +1577,6 @@ const FAILURE_TEXTS = {
  * it only for a cooldown).
  */
 async function readImageBlock(ctx, block, signal) {
-  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  let dir
   // Which stage failed decides the (constant) placeholder text below. Even
   // the media stage carries no variable part: the type string arrives from
   // paste metadata and replayed content, so it is attacker-shaped, and an
@@ -1505,45 +1584,30 @@ async function readImageBlock(ctx, block, signal) {
   // The concrete type goes to the harness log with the rest of the detail.
   let stage = 'store'
   try {
-    // StoredImageAttachment carries { ref, data: Uint8Array }; the media type
-    // rides the reference (verified against dsh attachment/src/types.ts).
-    const stored = await ctx.attachments.readImage(block.attachment, signal)
-    if (!stored?.data) {
-      // Named failure instead of Buffer.from(undefined)'s bare TypeError the
-      // next time a developer-preview release moves the field (issue #17).
-      throw new Error("attachments.readImage returned no 'data' bytes; the dsh attachment shape may have changed")
-    }
-    const mediaType = stored.ref?.mediaType ?? block.attachment?.mediaType
-    const ext = MEDIA_EXT[mediaType]
-    if (!ext) {
-      // Refusing beats disguising: a fake .png suffix would make the CLI (and
-      // the provider behind it) judge mislabelled bytes.
-      stage = 'media'
-      throw new Error(`unsupported pasted media type ${mediaType ?? '(none declared)'}`)
-    }
+    const stored = await readStoredImage(ctx.attachments, block.attachment, signal)
+    stage = 'media'
+    const ext = storedImageExt(stored, block.attachment)
     stage = 'engine'
-    dir = await mkdtemp(join(tmpdir(), 'modlens-dsh-'))
-    const file = join(dir, `paste${ext}`)
-    await writeFile(file, Buffer.from(stored.data), { mode: 0o600 })
-    const cli = process.env.MODLENS_DSH_CLI || CLI_PATH
-    const { stdout, stderr, code } = await run(
-      process.execPath,
-      [cli, '-i', file, '--timeout', String(CLI_TIMEOUT_MS)],
-      signal,
-    )
-    if (code !== 0) {
-      throw new Error((stderr || stdout).trim().slice(0, 300))
+    const result = await readImageBytes(stored.data, ext, undefined, signal)
+    // Only a well-formed id is echoed (see ATTACHMENT_ID).
+    const id = stored.ref?.attachmentId
+    const named = typeof id === 'string' && ATTACHMENT_ID.test(id)
+    // Frozen: the same object rides every later step from the cache, and a
+    // downstream listener mutating it would silently rewrite history.
+    const evidence = Object.freeze({
+      type: 'text',
+      text: [
+        '[Pasted image, read by the modlens vision bridge]',
+        ...(named ? [`attachment-id: ${id}`] : []),
+        renderEvidence(result),
+      ].join('\n'),
+    })
+    // Tied only once the success block exists, so an engine answer that
+    // fails to render can never leave a re-readable id behind.
+    if (named) {
+      NAMED_EVIDENCE.set(evidence, stored.ref)
     }
-    const parsed = JSON.parse(stdout)
-    return {
-      ok: true,
-      // Frozen: the same object rides every later step from the cache, and a
-      // downstream listener mutating it would silently rewrite history.
-      block: Object.freeze({
-        type: 'text',
-        text: `[Pasted image, read by the modlens vision bridge]\n${renderEvidence(parsed.result)}`,
-      }),
-    }
+    return { ok: true, block: evidence }
   } catch (error) {
     const detail = error instanceof Error ? error.message.slice(0, 300) : String(error)
     console.error(`[modlens] image read failed (${stage}): ${detail}`)
@@ -1554,10 +1618,52 @@ async function readImageBlock(ctx, block, signal) {
         text: FAILURE_TEXTS[stage],
       }),
     }
-  } finally {
-    if (dir) {
-      await rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/** Fetch one stored image from the host attachment store, bytes checked. */
+async function readStoredImage(attachments, ref, signal) {
+  // StoredImageAttachment carries { ref, data: Uint8Array }; the media type
+  // rides the reference (verified against dsh attachment/src/types.ts).
+  const stored = await attachments.readImage(ref, signal)
+  if (!stored?.data) {
+    // Named failure instead of Buffer.from(undefined)'s bare TypeError the
+    // next time a developer-preview release moves the field (issue #17).
+    throw new Error("attachments.readImage returned no 'data' bytes; the dsh attachment shape may have changed")
+  }
+  return stored
+}
+
+/** The file extension for a stored image's media type, or a refusal. */
+function storedImageExt(stored, ref) {
+  const mediaType = stored.ref?.mediaType ?? ref?.mediaType
+  const ext = MEDIA_EXT[mediaType]
+  if (!ext) {
+    // Refusing beats disguising: a fake .png suffix would make the CLI (and
+    // the provider behind it) judge mislabelled bytes.
+    throw new Error(`unsupported pasted media type ${mediaType ?? '(none declared)'}`)
+  }
+  return ext
+}
+
+/**
+ * Hand image bytes to the CLI through a private temp file and return the
+ * vision result. The file is 0600 in a fresh directory, removed afterwards.
+ */
+async function readImageBytes(data, ext, prompt, signal) {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(join(tmpdir(), 'modlens-dsh-'))
+  try {
+    const file = join(dir, `paste${ext}`)
+    await writeFile(file, Buffer.from(data), { mode: 0o600 })
+    const cli = process.env.MODLENS_DSH_CLI || CLI_PATH
+    const cliArgs = [cli, '-i', file, '--timeout', String(CLI_TIMEOUT_MS)]
+    if (prompt) {
+      cliArgs.push('--prompt', prompt)
     }
+    return parseCliResult(await run(process.execPath, cliArgs, signal))
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
 }
 
