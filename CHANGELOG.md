@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.27.1 - 2026-10-16
+
+- **Packaging: the `bin` path no longer trips npm's publish warning.** npm 11 strips the leading `./` from `bin` targets at publish time and reports it as "script name dist/main.js was invalid and removed", which reads like the `modlens` command was dropped. It never was: every published version kept the entry and installs the command. The path is now written the way npm stores it, so the warning is gone.
+
 ## 3.27.0 - 2026-10-16
 
 - **dsh: reread a pasted image with a new focus ([#121](https://github.com/liustack/modlens/issues/121)).** Paste evidence carried no handle back to the image, so a model that wanted a second look (say, the axis labels) could only guess at files in the attachment store. The evidence now has an `attachment-id: sha256:…` line, and `modlens_read_image` takes that id as its `path`, so the plugin pulls the bytes from the attachment store and reads them again with the given `prompt`. Only images this plugin read in the session resolve (the 256 most recent in the history being sent). An unknown id gets a fixed error asking for the file instead, and never echoes what the model passed. No host path goes on the wire: the store layout is dsh's own, and the path carries the user's home directory. Thanks to @cutefelix.
