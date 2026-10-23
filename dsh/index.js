@@ -1300,14 +1300,16 @@ function cachedEvidence(ctx, adapter, block, walk) {
       // Refresh recency: Map iteration order is insertion order.
       adapter.evidenceCache.delete(key)
       adapter.evidenceCache.set(key, hit)
-      return cooling ? Promise.resolve(hit.block) : hit.then(remember)
+      if (cooling) return Promise.resolve(hit.block)
+      void touchEvidence(block.attachment, hit)
+      return hit.then(remember)
     }
     // Cooldown over: fall through into one fresh probe.
   }
   // Deliberately no caller signal: a shared entry must not die with its first
   // caller (their abort used to cancel every concurrent joiner). A cancelled
   // caller simply stops awaiting; the read finishes and the cache keeps it.
-  const pending = readImageBlock(ctx, block, undefined).then(
+  const pending = readEvidence(ctx, block).then(
     (evidence) => {
       // Only replace our own entry: this promise may have been LRU-evicted
       // and the key re-populated by a newer read meanwhile.
@@ -1617,6 +1619,230 @@ async function readImageBlock(ctx, block, signal) {
         type: 'text',
         text: FAILURE_TEXTS[stage],
       }),
+    }
+  }
+}
+
+/**
+ * One image block's evidence: from the store when an earlier plugin instance
+ * already read it, else from the engine. Same contract as readImageBlock:
+ * never throws, `ok: false` on failure.
+ *
+ * The engine stays one image at a time. Running several at once would turn a
+ * resumed history into a burst against the user's API key, and a rate-limit
+ * answer there cools the key for every harness sharing ~/.modlens, not just
+ * dsh. The store is what removes the re-reads; a cancelled request also
+ * stops at the image in flight instead of draining a queue.
+ */
+async function readEvidence(ctx, block) {
+  const stored = await loadEvidence(block.attachment)
+  if (stored) return { ok: true, block: stored }
+  const evidence = await readImageBlock(ctx, block, undefined)
+  if (evidence.ok) {
+    await saveEvidence(block.attachment, evidence.block)
+  }
+  return evidence
+}
+
+/**
+ * The evidence store: one file per pasted image, so a restarted plugin (dsh
+ * restarts, session resume) answers from disk instead of sending the whole
+ * history back through the engine (#122). The session log stays untouched:
+ * it belongs to dsh, and it keeps the real image blocks on purpose.
+ *
+ * Only content-addressed attachments are stored. Their id is the sha256 of
+ * the bytes, so an entry can never answer for a different picture; any other
+ * id may name new bytes after a restart.
+ *
+ * Evidence is a transcription of the user's image, so the store is private
+ * (0700 directory, 0600 files) and does not keep it forever: entries unread
+ * for EVIDENCE_TTL_MS are removed, and past EVIDENCE_STORE_MAX_BYTES the
+ * least recently read go first.
+ */
+const EVIDENCE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+// Memory hits refresh an entry's file time at most this often. A desktop dsh
+// that stays open answers from memory for weeks, and an entry still in use
+// must not age out underneath it.
+const EVIDENCE_TOUCH_INTERVAL_MS = 24 * 60 * 60 * 1000
+// Bumped whenever the evidence text changes shape (a new header line, a
+// different rendering), so old entries stop answering instead of putting
+// yesterday's format back on the wire.
+const EVIDENCE_FORMAT = 1
+const EVIDENCE_STORE_MAX_BYTES = 64 * 1024 * 1024
+// Housekeeping runs at most this often, on the first store access and then
+// on later ones; a long session must not list the directory on every read.
+const EVIDENCE_SWEEP_INTERVAL_MS = 60 * 60 * 1000
+let lastEvidenceSweepAt = -Infinity
+
+/** Resolved at call time, so a faked HOME (tests) redirects the store too. */
+function evidenceRoot() {
+  return join(homedir(), '.modlens', 'dsh-evidence')
+}
+
+/**
+ * Which engine a read would use, as far as the shared config says. Switching
+ * engines is how a user asks for a better reading, and a restart used to be
+ * enough to get one; keying the store on this keeps it that way. Variables
+ * the file does not mention are not covered, which is acceptable for a
+ * cache: at worst an entry outlives the switch until it expires.
+ */
+function engineFingerprint() {
+  let config
+  try {
+    config = readModlensConfig()
+  } catch {
+    // The CLI refuses the same file, so no read under it can succeed and
+    // nothing is stored under this fingerprint.
+    return ['unreadable']
+  }
+  const provider = typeof config.provider === 'string' ? (ENGINE_ALIASES[config.provider] ?? config.provider) : ''
+  const settings = Object.assign({}, ...settingsKeysFor(provider).map((key) => config.providers?.[key] ?? {}))
+  return [provider, settings.model ?? '', settings.baseUrl ?? '']
+}
+
+async function evidenceFile(ref) {
+  if (typeof ref?.attachmentId !== 'string' || !ATTACHMENT_ID.test(ref.attachmentId)) return undefined
+  const { createHash } = await import('node:crypto')
+  // The whole ref, not just the id: the cache key is the ref, and the same
+  // bytes declared as another media type are a different read.
+  const name = createHash('sha256')
+    .update(JSON.stringify([EVIDENCE_FORMAT, engineFingerprint(), evidenceKey(ref)]))
+    .digest('hex')
+  return join(evidenceRoot(), `${name}.json`)
+}
+
+async function loadEvidence(ref) {
+  const file = await evidenceFile(ref)
+  if (!file) return undefined
+  maybeSweepEvidence()
+  const { readFile, utimes } = await import('node:fs/promises')
+  let entry
+  try {
+    entry = JSON.parse(await readFile(file, 'utf8'))
+  } catch (error) {
+    // Missing is the ordinary miss. Anything else (a torn write, a damaged
+    // file) also reads the image again, which rewrites the entry.
+    if (error?.code !== 'ENOENT') {
+      console.error(`[modlens] evidence store entry unreadable, reading the image again: ${error?.message ?? error}`)
+    }
+    return undefined
+  }
+  if (typeof entry?.text !== 'string' || typeof entry.ref?.attachmentId !== 'string') {
+    console.error('[modlens] evidence store entry malformed, reading the image again')
+    return undefined
+  }
+  const evidence = Object.freeze({ type: 'text', text: entry.text })
+  // The restored block names its attachment exactly like a fresh read, so
+  // the tool can re-read it with a new focus (#121).
+  if (ATTACHMENT_ID.test(entry.ref.attachmentId)) {
+    NAMED_EVIDENCE.set(evidence, entry.ref)
+  }
+  await touchFile(file, utimes)
+  return evidence
+}
+
+/**
+ * Recency is the file time: a read keeps the entry clear of the TTL and at
+ * the back of the ceiling's queue. Failing to refresh it only lets the entry
+ * age out early, so it is logged rather than thrown.
+ */
+async function touchFile(file, utimes) {
+  const now = new Date()
+  await utimes(file, now, now).catch((error) => {
+    if (error?.code !== 'ENOENT') {
+      console.error(`[modlens] evidence store entry could not be refreshed: ${error?.message ?? error}`)
+    }
+  })
+}
+
+// When each in-memory entry last refreshed its file, keyed by the cached
+// promise so the record dies with the entry.
+const EVIDENCE_TOUCHED = new WeakMap()
+
+/** A memory hit counts as a read of the stored entry, at most once a day. */
+async function touchEvidence(ref, entry) {
+  const now = Date.now()
+  const last = EVIDENCE_TOUCHED.get(entry)
+  if (last !== undefined && now - last < EVIDENCE_TOUCH_INTERVAL_MS) return
+  EVIDENCE_TOUCHED.set(entry, now)
+  const file = await evidenceFile(ref)
+  if (!file) return
+  const { utimes } = await import('node:fs/promises')
+  await touchFile(file, utimes)
+}
+
+/** Write one entry. A failure only costs a re-read later, so it is logged, not thrown. */
+async function saveEvidence(ref, evidence) {
+  const named = NAMED_EVIDENCE.get(evidence)
+  const file = await evidenceFile(ref)
+  if (!file || !named) return
+  // The display name is the user's original file name: optional in the ref,
+  // not needed to read the bytes again, and not worth keeping on disk.
+  const { name: _displayName, ...kept } = named
+  const { mkdir, writeFile, rename, rm } = await import('node:fs/promises')
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  try {
+    await mkdir(evidenceRoot(), { recursive: true, mode: 0o700 })
+    // Write then rename, so a crash mid-write never leaves a torn entry
+    // under the real name.
+    await writeFile(temp, JSON.stringify({ text: evidence.text, ref: kept }), { mode: 0o600 })
+    await rename(temp, file)
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {})
+    console.error(`[modlens] evidence store write failed: ${error?.message ?? error}`)
+  }
+  maybeSweepEvidence()
+}
+
+function maybeSweepEvidence() {
+  const now = Date.now()
+  if (now - lastEvidenceSweepAt < EVIDENCE_SWEEP_INTERVAL_MS) return
+  lastEvidenceSweepAt = now
+  void sweepEvidenceStore(now)
+}
+
+/**
+ * Remove entries unread past the TTL, then the least recently read until the
+ * store fits the ceiling. Only regular files are touched: entries are read
+ * with withFileTypes, so a symlink reads as a link and is never followed.
+ * Never throws: housekeeping must not fail a read.
+ */
+async function sweepEvidenceStore(now = Date.now(), root = evidenceRoot(), maxBytes = EVIDENCE_STORE_MAX_BYTES) {
+  const { readdir, stat, rm } = await import('node:fs/promises')
+  let entries
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch (error) {
+    // No store yet is the ordinary case. Anything else means cleanup is not
+    // running, which somebody should be able to find out.
+    if (error?.code !== 'ENOENT') {
+      console.error(`[modlens] evidence store cleanup skipped: ${error?.message ?? error}`)
+    }
+    return
+  }
+  const kept = []
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    const full = join(root, entry.name)
+    try {
+      const info = await stat(full)
+      if (now - info.mtimeMs >= EVIDENCE_TTL_MS) {
+        await rm(full, { force: true })
+        continue
+      }
+      kept.push({ full, mtimeMs: info.mtimeMs, bytes: info.size })
+    } catch {
+      // Vanished or held between listing and removal; the next sweep retries.
+    }
+  }
+  let total = kept.reduce((sum, item) => sum + item.bytes, 0)
+  for (const item of kept.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
+    if (total <= maxBytes) break
+    try {
+      await rm(item.full, { force: true })
+      total -= item.bytes
+    } catch {
+      // Still held; keep freeing the rest.
     }
   }
 }
@@ -2355,6 +2581,13 @@ function registerConfigRoute(ctx) {
 // and write a real file and a real environment, so they are tested against
 // both rather than through the HTTP route.
 export const __config = { engineSummary, applyEngineSettings, modlensConfigPath, refusal: ROUTE_REFUSAL }
+
+// The evidence store (#122), reachable from the test suite the way __paste is.
+export const __evidence = {
+  evidenceRoot,
+  sweepEvidenceStore,
+  ttlMs: EVIDENCE_TTL_MS,
+}
 
 // The paste sweeper, reachable from the test suite the way __config is.
 export const __paste = {

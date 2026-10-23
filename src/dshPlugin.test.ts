@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VISION_RESULT_SCHEMA } from './schema.ts';
 
 const execFileAsync = promisify(execFile);
@@ -34,6 +34,28 @@ afterAll(() => {
     for (const dir of routePasteDirs) {
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+/**
+ * Every test gets its own home. The evidence store lives under ~/.modlens and
+ * outlives a plugin instance by design (#122), so a shared home would let one
+ * test's reading answer the next test's image, and would leave this suite's
+ * fake evidence in a developer's real store. os.homedir() follows HOME on
+ * POSIX and USERPROFILE on Windows.
+ */
+const realHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+let testHome = '';
+beforeEach(() => {
+    testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-dsh-home-'));
+    process.env.HOME = testHome;
+    process.env.USERPROFILE = testHome;
+});
+afterEach(() => {
+    for (const [key, value] of Object.entries(realHome)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
+    fs.rmSync(testHome, { recursive: true, force: true });
 });
 
 describe('dsh plugin bundle', () => {
@@ -6159,5 +6181,331 @@ describe('pasted evidence points back at its attachment (#121)', () => {
         } finally {
             delete process.env.MODLENS_DSH_CLI;
         }
+    });
+});
+
+describe('a resumed session does not re-read its whole history (#122)', () => {
+    type Handler = (
+        payload: { messages: unknown[]; signal?: AbortSignal },
+        next: () => Promise<unknown>,
+    ) => Promise<{ kind: string; messages?: Array<{ content: Array<{ text?: string }> }> }>;
+    type Tool = {
+        execute: (
+            args: { path: string; prompt?: string },
+            exec: { signal?: AbortSignal },
+        ) => Promise<{ summary: string }>;
+    };
+    type Ref = { attachmentId: string; mediaType: string };
+    type EvidenceStore = {
+        evidenceRoot: () => string;
+        sweepEvidenceStore: (now?: number, root?: string, maxBytes?: number) => Promise<void>;
+        ttlMs: number;
+    };
+
+    const id = (n: number) => `sha256:${n.toString(16).padStart(64, '0')}`;
+
+    /**
+     * Logs a start and an end mark around a short sleep, so the log shows how
+     * many reads overlapped, and answers with the bytes it was handed so the
+     * test can tell which image each evidence block came from. Bytes ending in
+     * "dead" come back with no result.
+     */
+    function fakeCli(): { cli: string; log: string } {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-dsh-cli-'));
+        const cli = path.join(dir, 'cli.js');
+        const log = path.join(dir, 'log');
+        fs.writeFileSync(log, '');
+        fs.writeFileSync(
+            cli,
+            `const fs = require('fs');
+            const at = (flag) => { const i = process.argv.indexOf(flag); return i > 0 ? process.argv[i + 1] : ''; };
+            const content = fs.readFileSync(at('-i')).toString();
+            fs.appendFileSync(${JSON.stringify(log)}, '+');
+            setTimeout(() => {
+                fs.appendFileSync(${JSON.stringify(log)}, '-');
+                if (content.endsWith('dead')) { console.log(JSON.stringify({ result: null })); return; }
+                console.log(JSON.stringify({ result: { summary: 'focus=' + at('--prompt'), ocr: { full_text: 'READ ' + content }, uncertainty: [] } }));
+            }, 150);`,
+        );
+        return { cli, log };
+    }
+
+    /** The most reads the log shows running at once. */
+    const peak = (log: string): number => {
+        let running = 0;
+        let most = 0;
+        for (const mark of fs.readFileSync(log, 'utf-8')) {
+            running += mark === '+' ? 1 : -1;
+            most = Math.max(most, running);
+        }
+        return most;
+    };
+
+    /** One plugin instance, the way dsh starts it after a restart. */
+    async function start() {
+        // @ts-expect-error untyped on purpose
+        const plugin = (await import('../dsh/index.js')) as {
+            apply: (ctx: unknown, config?: Record<string, unknown>) => void;
+            __evidence: EvidenceStore;
+        };
+        const handlers: Record<string, Handler> = {};
+        const reads: Ref[] = [];
+        let tool: Tool | undefined;
+        plugin.apply(
+            {
+                tools: {
+                    register: (value: Tool) => {
+                        tool = value;
+                    },
+                },
+                attachments: {
+                    readImage: async (ref: Ref) => {
+                        reads.push(ref);
+                        return { ref, data: new TextEncoder().encode(ref.attachmentId) };
+                    },
+                },
+                on: (event: string, fn: Handler) => {
+                    handlers[event] = fn;
+                },
+            } as never,
+            { autoRead: true, visionProvider: false },
+        );
+        if (!tool) throw new Error('tool was not registered');
+        /** One step whose history holds these images; returns every block's text. */
+        const step = async (...attachmentIds: string[]): Promise<string[]> =>
+            stepWith(undefined, ...attachmentIds);
+        const stepWith = async (
+            signal: AbortSignal | undefined,
+            ...attachmentIds: string[]
+        ): Promise<string[]> => {
+            const messages = attachmentIds.map((attachmentId) => ({
+                role: 'user',
+                content: [
+                    {
+                        type: 'image',
+                        attachment: {
+                            attachmentId,
+                            mediaType: 'image/png',
+                            name: 'secret-plan.png',
+                        },
+                    },
+                ],
+            }));
+            const decision = await handlers['agent/pre-step']({ messages, signal }, async () => ({
+                kind: 'enter',
+                messages,
+            }));
+            return (decision.messages ?? []).map((message) => message.content[0].text ?? '');
+        };
+        return { tool, reads, step, stepWith, store: plugin.__evidence };
+    }
+
+    it('answers a restarted plugin from the store, without the engine', async () => {
+        const { cli, log } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            const first = await start();
+            const before = await first.step(id(1), id(2));
+            const ranBefore = fs.readFileSync(log, 'utf-8').length;
+
+            const second = await start();
+            const after = await second.step(id(1), id(2));
+            // Byte-identical: a different reading would rewrite the history.
+            expect(after).toEqual(before);
+            expect(fs.readFileSync(log, 'utf-8').length).toBe(ranBefore);
+            expect(second.reads).toHaveLength(0);
+
+            // The restored evidence still names its attachment, so the model
+            // can re-read it with a new focus.
+            const result = await second.tool.execute({ path: id(1), prompt: 'the legend' }, {});
+            expect(result.summary).toBe('focus=the legend');
+            expect(second.reads).toEqual([{ attachmentId: id(1), mediaType: 'image/png' }]);
+            // The original file name stays out of the store.
+            const root = second.store.evidenceRoot();
+            for (const file of fs.readdirSync(root)) {
+                expect(fs.readFileSync(path.join(root, file), 'utf-8')).not.toContain(
+                    'secret-plan',
+                );
+            }
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    // Windows has no POSIX mode bits to check.
+    it.skipIf(process.platform === 'win32')('keeps the store private', async () => {
+        const { cli } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            const { step, store } = await start();
+            await step(id(1));
+            const root = store.evidenceRoot();
+            expect(fs.statSync(root).mode & 0o777).toBe(0o700);
+            const files = fs.readdirSync(root);
+            expect(files).toHaveLength(1);
+            expect(fs.statSync(path.join(root, files[0])).mode & 0o777).toBe(0o600);
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    it('does not store a failed read', async () => {
+        const { cli, log } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            const broken = `sha256:${'0'.repeat(60)}dead`;
+            const [text] = await (await start()).step(broken);
+            expect(text).toContain('could not be read');
+            await (await start()).step(broken);
+            expect(fs.readFileSync(log, 'utf-8')).toBe('+-+-');
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    it('stores only content-addressed attachments', async () => {
+        // An id that is not the hash of its bytes can name different bytes
+        // after a restart, and the store would answer with the old picture.
+        const { cli, log } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            await (await start()).step('att-1');
+            await (await start()).step('att-1');
+            expect(fs.readFileSync(log, 'utf-8')).toBe('+-+-');
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    it('stops at the image in flight when the request is cancelled', async () => {
+        // The engine runs one image at a time, so cancelling a long history
+        // costs at most the read already under way.
+        const { cli, log } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            const { stepWith } = await start();
+            const controller = new AbortController();
+            const run = stepWith(controller.signal, id(1), id(2), id(3)).catch(() => 'aborted');
+            await vi.waitFor(() => expect(fs.readFileSync(log, 'utf-8')).toBe('+'));
+            controller.abort();
+            expect(await run).toBe('aborted');
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            expect(fs.readFileSync(log, 'utf-8')).toBe('+-');
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    it('reads again after the user switches engines', async () => {
+        const { cli, log } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        const config = path.join(testHome, '.modlens', 'config.json');
+        fs.mkdirSync(path.dirname(config), { recursive: true });
+        try {
+            fs.writeFileSync(config, JSON.stringify({ provider: 'gemini-api' }));
+            await (await start()).step(id(1));
+            fs.writeFileSync(
+                config,
+                JSON.stringify({ provider: 'openai', providers: { openai: { model: 'm1' } } }),
+            );
+            await (await start()).step(id(1));
+            fs.writeFileSync(
+                config,
+                JSON.stringify({ provider: 'openai', providers: { openai: { model: 'm2' } } }),
+            );
+            await (await start()).step(id(1));
+            await (await start()).step(id(1));
+            expect(fs.readFileSync(log, 'utf-8')).toBe('+-+-+-');
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    it('keeps an entry in use from ageing out while dsh stays open', async () => {
+        const { cli } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+            const { step, store } = await start();
+            await step(id(1));
+            const root = store.evidenceRoot();
+            const [file] = fs.readdirSync(root);
+            const full = path.join(root, file);
+            // A memory hit refreshes the file, then at most once a day.
+            await step(id(1));
+            const old = (Date.now() - store.ttlMs + 60_000) / 1000;
+            fs.utimesSync(full, old, old);
+            vi.setSystemTime(Date.now() + 2 * 24 * 60 * 60 * 1000);
+            await step(id(1));
+            await vi.waitFor(() =>
+                expect(Date.now() - fs.statSync(full).mtimeMs).toBeLessThan(60_000),
+            );
+            await store.sweepEvidenceStore(Date.now() + 120_000, root);
+            expect(fs.existsSync(full)).toBe(true);
+        } finally {
+            vi.useRealTimers();
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    it('treats a damaged entry as a miss and reads the image again', async () => {
+        const { cli, log } = fakeCli();
+        process.env.MODLENS_DSH_CLI = cli;
+        try {
+            const first = await start();
+            const before = await first.step(id(1));
+            const root = first.store.evidenceRoot();
+            for (const file of fs.readdirSync(root)) {
+                fs.writeFileSync(path.join(root, file), '{"text": 42');
+            }
+            const after = await (await start()).step(id(1));
+            expect(after).toEqual(before);
+            expect(fs.readFileSync(log, 'utf-8')).toBe('+-+-');
+        } finally {
+            delete process.env.MODLENS_DSH_CLI;
+        }
+    });
+
+    // Symlinks need elevated rights on Windows.
+    it.skipIf(process.platform === 'win32')(
+        'removes expired entries, then the oldest past the ceiling',
+        async () => {
+            const { store } = await start();
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-evidence-'));
+            try {
+                const now = Date.now();
+                const put = (name: string, ageMs: number, bytes = 100) => {
+                    const file = path.join(root, name);
+                    fs.writeFileSync(file, 'x'.repeat(bytes));
+                    const at = (now - ageMs) / 1000;
+                    fs.utimesSync(file, at, at);
+                };
+                put('expired.json', store.ttlMs + 1000);
+                put('oldest.json', 3000);
+                put('older.json', 2000);
+                put('newest.json', 1000);
+                const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'modlens-outside-'));
+                fs.writeFileSync(path.join(outside, 'keep.json'), 'x');
+                fs.symlinkSync(outside, path.join(root, 'link.json'));
+
+                await store.sweepEvidenceStore(now, root, 250);
+                expect(fs.readdirSync(root).sort()).toEqual([
+                    'link.json',
+                    'newest.json',
+                    'older.json',
+                ]);
+                expect(fs.existsSync(path.join(outside, 'keep.json'))).toBe(true);
+                fs.rmSync(outside, { recursive: true, force: true });
+            } finally {
+                fs.rmSync(root, { recursive: true, force: true });
+            }
+        },
+    );
+
+    it('lives under the modlens home, never touched by the suite for real', async () => {
+        const { store } = await start();
+        expect(store.evidenceRoot()).toBe(path.join(testHome, '.modlens', 'dsh-evidence'));
+        const real = path.join(realHome.HOME ?? '', '.modlens', 'dsh-evidence');
+        expect(store.evidenceRoot()).not.toBe(real);
     });
 });

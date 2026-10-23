@@ -16,6 +16,12 @@ Images pulled out of session storage are written 0600 into a 0700 directory. By 
 
 Recovery is also scoped to one project: the working directory recorded inside the transcript is checked, not just the directory name, because directory slugs collide (`/tmp/a.b` and `/tmp/a-b` produce the same one). A neighbouring project's images are never handed over.
 
+## The dsh plugin keeps what it read
+
+In DeepSeek Harness, the plugin keeps the evidence text it produced for each pasted image in `~/.modlens/dsh-evidence/`, so a restarted or resumed session does not send its whole image history back through the engine. Each entry is the full transcription of one image, so the directory is 0700 and every file 0600. Only images whose attachment id is the sha256 of their bytes are kept, which means an entry can never answer for a different picture.
+
+Entries are tied to the engine in `~/.modlens/config.json` (provider, model, endpoint), so switching engines reads the images again. Deleting a dsh session does not delete its entries: they are removed after 30 days unread, and past 64 MB the least recently read go first. Deleting the directory is always safe: the next read of each image runs the engine again.
+
 ## Permissions passed to engines
 
 ModLens invokes `agy` with `--dangerously-skip-permissions` because prompt mode fails in some environments without it. The prompt restricts the agent to reading the one image it was given, and instructs it to treat image content strictly as data.

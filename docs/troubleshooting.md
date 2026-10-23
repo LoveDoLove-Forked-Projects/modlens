@@ -215,6 +215,16 @@ this section.
     toolName: vision_read_image
 ```
 
+## dsh: a pasted image keeps an old or wrong reading
+
+The plugin keeps each pasted image's evidence in `~/.modlens/dsh-evidence/`, so
+a restarted or resumed session answers from disk instead of reading its whole
+image history again ([#122](https://github.com/liustack/modlens/issues/122)).
+Entries are tied to the engine in `~/.modlens/config.json`: switch the
+provider or model there, restart dsh, and the images are read again. To drop
+every stored reading, delete the directory. Nothing breaks, the next read of
+each image just runs the engine.
+
 ## fetch failed, or could not connect
 
 ```

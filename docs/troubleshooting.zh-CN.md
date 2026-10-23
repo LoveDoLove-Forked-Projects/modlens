@@ -176,6 +176,10 @@ dsh 的 reconcile 会注意到新版本上的 bundle 声明并激活它，随后
     toolName: vision_read_image
 ```
 
+## dsh：粘贴的图片一直沿用旧的或错误的识别结果
+
+插件把每张粘贴图片的证据存在 `~/.modlens/dsh-evidence/`，重启或恢复会话时直接从磁盘读，不再把历史里的图片全部重新识别（[#122](https://github.com/liustack/modlens/issues/122)）。记录和 `~/.modlens/config.json` 里的引擎绑定：在那里换掉 provider 或 model，重启 dsh，图片就会重新识别。想清掉所有记录，直接删除这个目录即可，不会坏任何东西，只是下次读到每张图时重新识别。
+
 ## fetch failed 或连接失败
 
 ```
